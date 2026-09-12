@@ -21,6 +21,11 @@ DOC_TYPE_MAP = {
 TOP_K = 5                # 每路召回条数
 RRF_K = 60               # RRF 融合常数：rank 越靠后贡献越小，60 是业内常用值
 SCORE_THRESHOLD = 0.02   # 融合分兜底阈值：低于它回复"暂无相关信息"
+SEMANTIC_MAX_DIST = 0.45 # 向量路硬门槛：cosine 距离 > 此值的候选不进融合。
+                         # 实测分布：真相关≈0.31 / 错域≈0.41 / 无关≈0.66。
+                         # 把"是否相关"判断留在语义空间，RRF 只管"两路合并"。
+                         # 只有单路信息时（如 BM25 命中精确型号），仍由
+                         # SCORE_THRESHOLD 在融合分上兜底。
 
 # BGE-M3 输出维度（ChromaDB 建 collection 时用）
 EMBED_DIM = 1024
