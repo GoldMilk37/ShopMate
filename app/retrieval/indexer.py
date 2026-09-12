@@ -106,6 +106,7 @@ def build_index(chunks: list[Chunk], persist_dir: Path | str | None = None) -> d
         if not group:
             continue
         coll = get_collection(coll_name, client)
+        # 兜底断言：分组非空才说明 meta["collection"] 链路通了（chunker→indexer 契约）
         # 分组后仍按批向量化（每批一起算向量，一次 upsert）
         for i in range(0, len(group), _embed_batch):
             batch = group[i:i + _embed_batch]
@@ -136,6 +137,10 @@ if __name__ == "__main__":
 
     stats = build_index(chunks)
     print("入库统计:", stats)
+    assert stats and set(stats) == set(COLLECTIONS), \
+        f"三个 collection 应全部有入库，实际: {stats}"   # 防再次空转——上次就栽在这里
+    covered = sum(stats.values())
+    assert covered == len(chunks), f"入库总数 {covered} != chunk 总数 {len(chunks)}"
 
     # 校验一：四个断言（计数/ID覆盖/维度）过后才算通过
     client = get_client()

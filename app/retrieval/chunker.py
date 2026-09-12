@@ -53,7 +53,8 @@ def chunk_all(docs: list[RawDoc]) -> list[Chunk]:
                 doc_id=d.doc_id,
                 chunk_id=f"{d.doc_id}#{i:02d}",
                 text=f"{anchor}{text}" if anchor else text,
-                meta={**d.meta, "doc_type": d.doc_type, "product_id": d.product_id},
+                meta={**d.meta, "doc_type": d.doc_type, "product_id": d.product_id,
+                      "collection": d.collection},   # indexer 按 meta["collection"] 分组入库
             ))
     return chunks
 

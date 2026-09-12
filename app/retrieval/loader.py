@@ -1,5 +1,4 @@
-"""第 1 步：加载 data/rag_docs/ 下的全部文档，产出 RawDoc 列表。（已实现）
-
+"""第 1 步：加载 data/rag_docs/ 下的全部文档，产出 list[RawDoc]。
 模块速览：
     load_all()                     全库加载，日常用这个
     load_one("specs/SKU-10001.json") 单文件加载，留给以后的增量更新
@@ -16,14 +15,14 @@ from pathlib import Path
 
 from .schema import RawDoc, DOC_TYPE_MAP
 
-# 知识库根目录：从本文件往上退两级（app/retrieval/ → ShopMate/），再拼 data/rag_docs
+# 知识库根目录：从本文件往上退三级级（app/retrieval/ → ShopMate/），再拼 data/rag_docs
 KB_ROOT = Path(__file__).resolve().parents[2] / "data" / "rag_docs"
 
 
 def load_all() -> list[RawDoc]:
     """遍历 rag_docs 六个子目录，返回全部文档的 RawDoc 列表。"""
     docs: list[RawDoc] = []
-    for folder in sorted(KB_ROOT.iterdir()):          # sorted 是为了让每次加载顺序稳定
+    for folder in sorted(KB_ROOT.iterdir()):   # sorted 默认按路径字符串排序，让每次加载顺序稳定 | iterdir()返回该目录下所有直接子项的迭代器
         if not folder.is_dir() or folder.name not in DOC_TYPE_MAP:
             continue                                   # 跳过临时目录 / .DS_Store 之类
         doc_type, collection = DOC_TYPE_MAP[folder.name]
