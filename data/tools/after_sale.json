@@ -1,0 +1,38 @@
+{
+  "name": "apply_after_sale",
+  "description": "提交退换货申请。调用前必须确认：1) 订单在售后时效内；2) 商品符合退换货政策；3) 用户已明确同意。此工具为写操作，需用户确认后执行。",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "order_id": {
+        "type": "string"
+      },
+      "product_id": {
+        "type": "string"
+      },
+      "type": {
+        "type": "string",
+        "enum": ["return", "exchange", "repair"],
+        "description": "售后类型：退货/换货/维修"
+      },
+      "reason": {
+        "type": "string",
+        "description": "售后原因"
+      },
+      "images": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "问题凭证图片URL"
+      }
+    },
+    "required": ["order_id", "product_id", "type", "reason"]
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "after_sale_id": {"type": "string"},
+      "status": {"type": "string"},
+      "next_step": {"type": "string"}
+    }
+  }
+}

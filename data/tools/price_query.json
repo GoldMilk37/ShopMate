@@ -1,0 +1,30 @@
+{
+  "name": "query_price",
+  "description": "查询商品当前价格、原价、活动价及优惠信息。适用于用户询问'多少钱''有优惠吗''能便宜点吗'等场景。",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "product_id": {
+        "type": "string"
+      },
+      "product_name": {
+        "type": "string"
+      },
+      "user_id": {
+        "type": "string",
+        "description": "用户ID，用于查询该用户可用的优惠券"
+      }
+    },
+    "required": []
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "product_id": {"type": "string"},
+      "original_price": {"type": "number"},
+      "current_price": {"type": "number"},
+      "promotions": {"type": "array"},
+      "coupons": {"type": "array"}
+    }
+  }
+}

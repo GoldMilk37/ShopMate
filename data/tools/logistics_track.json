@@ -1,0 +1,37 @@
+{
+  "name": "track_logistics",
+  "description": "根据订单号查询物流轨迹和预计送达时间。适用于用户询问'快递到哪了''什么时候能到'等场景。",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "order_id": {
+        "type": "string",
+        "description": "订单号"
+      },
+      "tracking_no": {
+        "type": "string",
+        "description": "物流单号，可选"
+      }
+    },
+    "required": ["order_id"]
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "carrier": {"type": "string"},
+      "tracking_no": {"type": "string"},
+      "status": {"type": "string"},
+      "traces": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "time": {"type": "string"},
+            "desc": {"type": "string"}
+          }
+        }
+      },
+      "estimated_delivery": {"type": "string"}
+    }
+  }
+}

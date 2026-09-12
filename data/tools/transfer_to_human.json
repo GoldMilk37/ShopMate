@@ -1,0 +1,32 @@
+{
+  "name": "transfer_to_human",
+  "description": "转接人工客服。触发条件：1) 用户明确要求转人工；2) 用户连续 2 次表达不满；3) 意图识别或 RAG 检索置信度低于阈值且兜底话术已尝试；4) 涉及赔偿、投诉升级、法律纠纷等超出 AI 权限的场景。调用后 AI 退出主流程，附最近 3 轮对话摘要给人工坐席。",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "reason": {
+        "type": "string",
+        "enum": ["user_request", "low_confidence", "user_dissatisfied", "out_of_scope"],
+        "description": "转接原因：用户主动要求 / 置信度不足 / 用户不满 / 超出AI权限"
+      },
+      "summary": {
+        "type": "string",
+        "description": "最近对话摘要，供人工坐席快速接手，避免用户重复陈述"
+      },
+      "urgency": {
+        "type": "string",
+        "enum": ["normal", "high"],
+        "description": "紧急程度；涉及资金损失、投诉升级设为 high"
+      }
+    },
+    "required": ["reason"]
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "ticket_id": {"type": "string"},
+      "queue_position": {"type": "integer"},
+      "estimated_wait": {"type": "string"}
+    }
+  }
+}

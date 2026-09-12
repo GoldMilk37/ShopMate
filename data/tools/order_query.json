@@ -1,0 +1,33 @@
+{
+  "name": "query_order",
+  "description": "根据用户ID或订单号查询订单状态、商品明细、金额、下单时间。适用于用户询问'我的订单到哪了''我买了什么''订单多少钱'等场景。",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "user_id": {
+        "type": "string",
+        "description": "用户ID，当用户未提供订单号时使用，查询该用户最近一笔订单"
+      },
+      "order_id": {
+        "type": "string",
+        "description": "订单号，精确查询指定订单"
+      },
+      "status_filter": {
+        "type": "string",
+        "enum": ["all", "pending", "paid", "shipped", "completed", "cancelled"],
+        "description": "订单状态筛选，默认为 all"
+      }
+    },
+    "required": []
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "order_id": {"type": "string"},
+      "status": {"type": "string"},
+      "items": {"type": "array"},
+      "total_amount": {"type": "number"},
+      "created_at": {"type": "string"}
+    }
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "name": "query_stock",
+  "description": "根据商品ID或商品名称查询实时库存数量。适用于用户询问'还有货吗''什么时候补货'等场景。",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "product_id": {
+        "type": "string",
+        "description": "商品ID，精确查询"
+      },
+      "product_name": {
+        "type": "string",
+        "description": "商品名称关键词，模糊查询"
+      },
+      "sku_attrs": {
+        "type": "object",
+        "description": "规格属性，如颜色、尺寸，用于查询具体SKU库存",
+        "properties": {
+          "color": {"type": "string"},
+          "size": {"type": "string"}
+        }
+      }
+    },
+    "required": []
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "product_id": {"type": "string"},
+      "stock": {"type": "integer"},
+      "in_stock": {"type": "boolean"},
+      "restock_date": {"type": "string", "description": "预计补货日期，无补货计划则为空"}
+    }
+  }
+}
