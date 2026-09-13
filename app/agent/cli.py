@@ -1,0 +1,54 @@
+"""聊天入口：命令行 REPL。已实现。
+
+模块速览：
+    main()              整个 Agent 的最终用户入口
+
+两个设计决策：
+    D1 会话 id 跟进程走：每次启动生成新 session_id（时间戳+随机后缀），
+       进程内 SessionStore 天然隔离，不会把上一次调试的上下文带进来。
+       将来换 API 服务时，这里改成从请求头取真实 session/user id。
+    D2 命令不进状态机：/exit 退出、/new 换会话、/history 查看记忆，
+       在 REPL 层拦截。业务命令混进对话历史会污染意图识别的上下文。
+"""
+import random
+import time
+
+from .graph import agent
+from .session import store
+
+
+def main() -> None:
+    import sys
+    if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+        sys.stdout.reconfigure(encoding="utf-8")
+
+    sid = f"s-{time.strftime('%H%M%S')}-{random.randint(100, 999)}"
+    print("=" * 56)
+    print("ShopMate 智能客服「小搭」  (exit 退出 / new 新会话 / history 看记忆)")
+    print("=" * 56)
+    while True:
+        try:
+            text = input("\n你: ").strip()
+        except (EOFError, KeyboardInterrupt):            # Ctrl+C / Ctrl+Z 都优雅退出
+            print("\n再见！")
+            break
+        if not text:
+            continue
+        if text in ("/exit", "exit", "退出"):
+            print("再见！")
+            break
+        if text in ("/new", "new"):                      # 换会话 = 全新上下文
+            sid = f"s-{time.strftime('%H%M%S')}-{random.randint(100, 999)}"
+            print(f"(已开启新会话 {sid})")
+            continue
+        if text in ("/history", "history"):
+            h = store.get(sid).history
+            print(f"(共 {len(h) // 2} 轮)")
+            for m in h:
+                print(f"  [{m['role']}] {m['content'][:60]}")
+            continue
+        print(f"\n小搭: {agent.handle(sid, text)}")
+
+
+if __name__ == "__main__":
+    main()

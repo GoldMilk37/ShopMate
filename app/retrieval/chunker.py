@@ -158,8 +158,11 @@ def _split_long(text: str, max_len: int = MAX_CHUNK_CHARS) -> list[str]:
 
 
 def _anchor(pid: str, names: dict[str, str], brands: dict[str, str]) -> str:
-    """商品锚点："【无线降噪蓝牙耳机 Pro | SoundCore】\\n"（D2，通用规则 b）。
+    """商品锚点："【SKU-10001 无线降噪蓝牙耳机 Pro | SoundCore】\\n"（D2，通用规则 b）。
 
+    商品ID也拼进去：评价/评价类文档的 H1（含 SKU 号）不入块，用户
+    报型号提问时（"SKU-10001 口碑怎么样"）BM25 要靠锚点里的 ID 才
+    能定位到那件商品的文档——评测发现的漏召回就是这么来的。
     非商品文档（policy/guide/faq）product_id 为空，锚点为空串，
     它们靠 D1 的父标题保上下文。
     """
@@ -169,7 +172,7 @@ def _anchor(pid: str, names: dict[str, str], brands: dict[str, str]) -> str:
     if not name:
         return ""
     brand = brands.get(pid, "")
-    head = f"{name} | {brand}" if brand else name
+    head = f"{pid} {name}" + (f" | {brand}" if brand else "")
     return f"【{head}】\n"
 
 

@@ -20,12 +20,13 @@ DOC_TYPE_MAP = {
 # ---- 检索参数 —— 01 文档 §5 ----
 TOP_K = 5                # 每路召回条数
 RRF_K = 60               # RRF 融合常数：rank 越靠后贡献越小，60 是业内常用值
-SCORE_THRESHOLD = 0.02   # 融合分兜底阈值：低于它回复"暂无相关信息"
+SCORE_THRESHOLD = 0.012  # 融合分兜底阈值：低于它回复"暂无相关信息"。
+"""  评测教训（app/retrieval/eval.py）：0.02 会把 BM25单路命中整批杀掉——单路 rank1 ≈ 0.0164，
+像"压胶起泡"这种向量路超距、BM25 精确命中的 query 会被误判为"暂无信息"。
+0.012 让单路 rank1~rank3 过线；无关 query 的兜底交给向量路 SEMANTIC_MAX_DIST无关词连候选都进不了融合，融合分为空）。"""
 SEMANTIC_MAX_DIST = 0.45 # 向量路硬门槛：cosine 距离 > 此值的候选不进融合。
                          # 实测分布：真相关≈0.31 / 错域≈0.41 / 无关≈0.66。
                          # 把"是否相关"判断留在语义空间，RRF 只管"两路合并"。
-                         # 只有单路信息时（如 BM25 命中精确型号），仍由
-                         # SCORE_THRESHOLD 在融合分上兜底。
 
 # BGE-M3 输出维度（ChromaDB 建 collection 时用）
 EMBED_DIM = 1024

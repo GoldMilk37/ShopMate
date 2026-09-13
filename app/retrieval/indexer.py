@@ -25,6 +25,7 @@
 完整建库：python -m app.retrieval.indexer
 """
 from pathlib import Path
+import os
 import threading
 
 from .schema import Chunk, EMBED_DIM
@@ -51,6 +52,14 @@ def get_model():
         return _model
     with _model_lock:
         if _model is None:                      # double-check：抢到锁后再看一眼
+            # 本地已有缓存就离线加载：transformers 默认会联网核对仓库模板
+            # 列表，网络不通时直接超时卡死（实测 WinError 10060）。缓存
+            # 判定要在 import FlagEmbedding 之前做——HF_HUB_OFFLINE 是
+            # import 时读的常量，运行时改不生效。
+            hub = Path(os.environ.get("HF_HUB_CACHE",
+                      Path.home() / ".cache" / "huggingface" / "hub"))
+            if (hub / "models--BAAI--bge-m3").exists():
+                os.environ.setdefault("HF_HUB_OFFLINE", "1")
             from FlagEmbedding import BGEM3FlagModel
             _model = BGEM3FlagModel("BAAI/bge-m3", use_fp16=True)   # fp16：内存减半，精度损失可忽略
     return _model

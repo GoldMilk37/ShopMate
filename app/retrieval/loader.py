@@ -12,7 +12,6 @@
 import json
 import time
 from pathlib import Path
-
 from .schema import RawDoc, DOC_TYPE_MAP
 
 # 知识库根目录：从本文件往上退三级级（app/retrieval/ → ShopMate/），再拼 data/rag_docs

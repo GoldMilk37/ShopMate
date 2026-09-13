@@ -37,18 +37,42 @@ import jieba
 from .schema import RRF_K, SCORE_THRESHOLD, SEMANTIC_MAX_DIST, TOP_K
 from .indexer import embed_texts, get_collection
 
-# D4：咨询场景的 doc_type 权重（乘在 RRF 分数上）
+# D4：咨询场景的 doc_type 权重（乘在 RRF 分数上）。
+# 评测教训（app/retrieval/eval.py）：guide 0.8 / faq 0.9 的衰减把融合分
+# 压到商品块之下，"预算三百以内"这类查询的指南文档被挤出 top5——
+# 加权只该用在"幻觉代价不同"的场合（价格只信 spec），不该用来表达
+# "哪个类型更重要"。只保留 spec 的 1.3，其余一律 1.0。
 DOC_TYPE_WEIGHTS = {
     "spec": 1.3,     # 结构化事实优先
     "product": 1.0,
-    "faq": 0.9,
-    "guide": 0.8,
+    "faq": 1.0,
+    "guide": 1.0,
     "policy": 1.0,
     "review": 1.0,
 }
 
 # D2：BM25 缓存  {collection: (bm25, ids, docs, metas)}
 _bm25_cache: dict[str, tuple] = {}
+
+# BM25 两侧共用的停用词：不分词侧过滤会造成 query/语料词频口径不一致。
+# 评测教训：'对/的' 这类高频虚词在语料里 IDF 低但架不住次数多，垃圾
+# query（"量子涨落对股市的影响"）靠它们攒出 4.76 分混过融合阈值。
+STOPWORDS = frozenset({
+    "的", "了", "吗", "呢", "吧", "啊", "呀", "哦", "嗯", "是", "在", "有", "和",
+    "与", "及", "或", "对", "对于", "关于", "把", "被", "让", "给", "用", "能",
+    "会", "可以", "要", "想", "想买", "求", "怎么", "怎么样", "怎样", "什么",
+    "多少", "几", "这个", "那个", "这种", "那种", "还有", "还是", "就是", "一下",
+    "我", "你", "他", "她", "它", "我们", "你们", "他们", "它们", "买", "卖",
+})
+
+# 仅 BM25 支持的候选（向量路零支持）必须与 query 有至少这么多个不同实词
+# 相交——向量路没背书时，词法巧合是唯一的假命中来源，这道门专拦它。
+MIN_LEXICAL_OVERLAP = 2
+
+
+def _tokenize(text: str) -> list[str]:
+    """BM25 统一的分词口径（query 与语料都走这里）。"""
+    return [t for t in jieba.lcut(text) if t.strip() and t not in STOPWORDS]
 
 
 def search(query: str, collection: str = "product_knowledge",
@@ -62,6 +86,15 @@ def search(query: str, collection: str = "product_knowledge",
     vector_ranks = _vector_route(query, collection, top_k)
     bm25_ranks = _bm25_route(query, collection, top_k)
     fused = _rrf([vector_ranks, bm25_ranks])
+
+    # 词法置信门：向量路零支持的候选，词法巧合是唯一来源，要求 ≥2 个
+    # 实词相交才保留（否则停用词级的弱匹配会污染兜底线之上的结果）。
+    if bm25_ranks and not vector_ranks:
+        q_tokens = set(_tokenize(query))
+        _, ids_all, docs_all, _ = _bm25_state(collection)
+        fused = {cid: s for cid, s in fused.items()
+                 if len(q_tokens & set(_tokenize(docs_all[ids_all.index(cid)])))
+                 >= MIN_LEXICAL_OVERLAP}
 
     # D4：加权 → 排序 → D5 阈值 → 截断
     _, ids, docs, metas = _bm25_state(collection)      # 语料都在 D1 的缓存里
@@ -102,9 +135,9 @@ def _vector_route(query: str, collection: str, top_k: int) -> list[tuple[str, in
 
 
 def _bm25_route(query: str, collection: str, top_k: int) -> list[tuple[str, int]]:
-    """BM25 路：jieba 分词后对建好的索引查询。返回 [(chunk_id, 排名)]。"""
+    """BM25 路：统一口径分词后对建好的索引查询。返回 [(chunk_id, 排名)]。"""
     bm25, ids, docs, _ = _bm25_state(collection)
-    tokens = [t for t in jieba.lcut(query) if t.strip()]
+    tokens = _tokenize(query)
     scores = bm25.get_scores(tokens)                   # 和每篇语料的打分 array
     ranked = sorted(range(len(ids)), key=lambda i: scores[i], reverse=True)
     return [(ids[i], r + 1) for r, i in enumerate(ranked[:top_k]) if scores[i] > 0]
@@ -118,7 +151,7 @@ def _bm25_state(collection: str) -> tuple:
         return _bm25_cache[collection]
     coll = get_collection(collection, create=False)    # 检索端绝不建空库
     got = coll.get(include=["documents", "metadatas"])
-    corpus = [[t for t in jieba.lcut(d) if t.strip()] for d in got["documents"]]
+    corpus = [_tokenize(d) for d in got["documents"]]
     from rank_bm25 import BM25Okapi                    # 小依赖，用到才 import
     state = (BM25Okapi(corpus), list(got["ids"]),
              list(got["documents"]), list(got["metadatas"]))
