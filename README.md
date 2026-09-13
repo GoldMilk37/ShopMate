@@ -269,4 +269,4 @@ MySQL / Redis 的方案已设计但**演示规模不接**，理由见文末「�
 | 评价域建了库但没意图会路由过去 | 新增第 8 个意图 `review_consult` → `review_knowledge` | `876089c` |
 | `intent.classify` 无重试，抖一下每句话都变"请澄清" | 复用 `client.safe_call`，并把解析失败与出网失败分开报 | `7dce383` |
 | `requirements.txt` 是 UTF-16、漏 `jieba`、混入未引用依赖 | 转 UTF-8；重写为直接依赖清单并补回 `jieba` | `05230df` / `e005907` |
-| 每轮内部决策无留痕，前端无从展示，docs/01 §五 的埋点承诺空着 | 本轮轨迹（`trace_view` 定契约）+ 检索埋点（`telemetry`）+ 侧栏可视化 | 本次 |
+| 每轮内部决策无留痕，前端无从展示，docs/01 §五 的埋点承诺空着 | 本轮轨迹（`trace_view` 定契约）+ 检索埋点（`telemetry`）+ 侧栏可视化 | `31a6330` |
