@@ -97,7 +97,8 @@ ShopMate/
 │   ├── 01_rag_knowledge_base.md   # 知识库：分域/分块/混合检索/评测结论
 │   ├── 02_tool_definitions.md     # 工具总览与调用原则（只读/写操作分级）
 │   ├── 03_agent_workflow.md       # 状态机：意图路由/置信度兜底/上下文管理
-│   └── 04_data_schema.md          # 元数据/Collection/MySQL/Redis 规范
+│   ├── 04_data_schema.md          # 元数据/Collection/MySQL/Redis 规范
+│   └── 05_demo_runbook.md         # 演示手册：怎么跑、问什么、看哪里
 ├── requirements.txt        # 只列直接依赖（6 个），不是 pip freeze 转储
 ├── .env.example            # key / 代理的填写模板，复制成 .env 用
 ├── LICENSE
@@ -149,6 +150,9 @@ streamlit run app/agent/webui.py  # 侧栏能点开看本轮内部状态；有�
 > 断言脚本真的跑起来了、一问一答进了会话、侧栏把轨迹画出来了。
 > 而 `curl /_stcore/health` 返回 200 **只说明服务器启动成功**：脚本要等 websocket
 > 连上才执行，所以健康探测证明不了应用正确。两者别互相替代。
+
+> **要演给别人看？** 见 [docs/05_demo_runbook.md](docs/05_demo_runbook.md)：
+> 问什么、看哪里、哪个问题对应哪条支路、哪两条兜底别在现场赌。
 
 > **环境坑**：系统 Python 缺 `jieba` 等依赖，一律用 `.venv/Scripts/python.exe` 跑。
 > BGE-M3 已缓存在本地，indexer 有缓存时不再联网。
