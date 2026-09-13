@@ -10,7 +10,7 @@
 |---|---|---|
 | RAG 检索（混合 + 话题商品锚点） | 已完成 | `python -m app.retrieval.eval` |
 | 工具层（6 工具，读写分级 + 确认门） | 已完成 | `python -m app.tools.executor` |
-| Agent 层（7 类意图 + 状态机 + 会话记忆） | 已完成 | `python -m app.agent.intent` / `.graph` |
+| Agent 层（8 类意图 + 状态机 + 会话记忆） | 已完成 | `python -m app.agent.intent` / `.graph` |
 | MySQL / Redis 接入 | 未开始（现为 SQLite + 进程内存） | — |
 
 ## 架构
@@ -170,8 +170,8 @@ BM25 漏 3 条，融合后只剩 2 条；再叠应用层锚点补到最后 2 条
 - [x] 评测：50 条集四路对照（hit@5 = 100%，达标线 85%）
 - [x] Agent 层：意图识别 + 状态机 + 会话记忆 + CLI 入口
 - [x] Agent 层话题商品锚点（product_id 槽位过滤）
-- [ ] 评价域路由：`review_knowledge` 库已建好，但 RAG_MODES 三个意图全指向
-      `product_knowledge`，"XX 口碑怎么样"目前仍拿商品详情作答
+- [x] 评价域路由：新增第 8 个意图 `review_consult`，把"口碑/评价/优缺点"
+      路由到 `review_knowledge`（此前该库建好但无人查，会拿商品详情作答）
 - [ ] MySQL / Redis 接入（现为 SQLite + 进程内存会话）
 - [ ] 多用户支持（工具层当前硬编码 `user_id="u1001"`）
 - [ ] FastAPI 服务 + Streamlit 演示前端

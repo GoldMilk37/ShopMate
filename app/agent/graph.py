@@ -6,7 +6,7 @@
 
 状态机全景（03 文档 §一 的落地）：
     用户输入 → [确认门] → 意图识别 → 路由分发
-      ├─ 商品咨询/参数对比/推荐 → RAG 检索 → 生成回复
+      ├─ 商品咨询/口碑评价/参数对比/推荐 → RAG 检索 → 生成回复
       ├─ 订单查询/售后 → LLM 工具编排（function calling 循环）→ 生成回复
       ├─ 点名转人工 → transfer_to_human → END
       └─ 闲聊 → 直接生成回复
@@ -127,9 +127,12 @@ def _safe_llm(fn, *args, **kwargs):
 YES_WORDS = ("确认", "确定", "是的", "好的", "好", "嗯", "可以", "要", "对", "继续", "办", "申请")
 NO_WORDS = ("不", "取消", "算了", "先不用", "再想想", "等等")
 
-# D4：三个 RAG 类意图的差异化全在这张表
+# D4：四个 RAG 类意图的差异化全在这张表
 RAG_MODES = {
     "product_consult": ("product_knowledge", "针对用户问的具体点作答。"),
+    "review_consult":  ("review_knowledge",
+                        "用户在问口碑：好评和差评**两边都要讲**，不要只挑好听的。"
+                        "有具体吐槽点就直说，最后给一句适用建议（什么人适合、什么人建议再想想）。"),
     "param_compare":   ("product_knowledge",
                         "用户在对比多个商品：先用资料给出逐项对比（表格或分条），再给一句倾向性建议；资料没覆盖的维度明说没有。"),
     "recommendation":  ("product_knowledge",
@@ -138,7 +141,9 @@ RAG_MODES = {
 
 # D8：只有「单商品」意图 + 带商品维度的库才做话题倾斜。
 # 对比类天然是两个商品，政策/指南库没有 product_id，套上去只会帮倒忙。
-FOCUSABLE = {"product_consult"}
+# review_consult 也得进来：评价按 SKU 存、doc 带 product_id，是标准的
+# 单商品场景。漏了它，"SKU-10001 口碑怎么样"就享受不到锚点重排。
+FOCUSABLE = {"product_consult", "review_consult"}
 
 
 def _anchored_product(hits: list[dict]) -> str:
@@ -193,6 +198,7 @@ class Agent:
         route = {
             "human_transfer": lambda: self._transfer(s, "user_request", text),
             "product_consult": lambda: self._answer_with_rag(s, text, ir),
+            "review_consult": lambda: self._answer_with_rag(s, text, ir),
             "param_compare": lambda: self._answer_with_rag(s, text, ir),
             "recommendation": lambda: self._answer_with_rag(s, text, ir),
             "order_query": lambda: self._tool_flow(s, text),
@@ -443,7 +449,8 @@ if __name__ == "__main__":
         print("\n-- 联网冒烟（真实 LLM + 本地 RAG + mock 工具）--")
         live = Agent(SessionStore())
         for q in ("SKU-10001 这个耳机现在多少钱",           # 工具支路（价格实时）
-                  "冲锋衣洗的时候有什么注意事项",             # RAG 支路
+                  "冲锋衣洗的时候有什么注意事项",             # RAG 支路（product_knowledge）
+                  "SKU-10001 这耳机口碑怎么样 有什么缺点",     # RAG 支路（review_knowledge，D6）
                   "你好呀"):                                # 闲聊
             print(f"\n用户: {q}\n小搭: {live.handle('smoke', q)}")
     else:

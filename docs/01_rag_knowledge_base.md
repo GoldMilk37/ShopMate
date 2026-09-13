@@ -171,8 +171,19 @@ top-5 进入 LLM 上下文
   演示规模下无感；真实规模下值得给这条补检索加一层缓存
   ——同 (query, product_id) 组合短期复用即可。
 
-**已知未闭环**：`RAG_MODES` 目前把 product_consult / param_compare / recommendation
-三个意图全部指向 `product_knowledge`，没有任何意图会绕到 `review_knowledge`。
-也就是说"XX 口碑怎么样"这句会拿商品详情去答，而不是评价——§二第 3 条规定的评价域
-路由还没有落地。补法无非两种（新增第 8 个意图，或在意图内按"口碑/缺点/评价"二次
-判定），牵涉意图集的扩，留作独立改动。
+**评价域路由（已闭环，2026-09-13）**：`RAG_MODES` 原先把 product_consult /
+param_compare / recommendation 三个意图全部指向 `product_knowledge`，没有任何意图
+会绕到 `review_knowledge`——"XX 口碑怎么样"会拿商品详情去答。§二第 3 条规定的
+评价域路由当时没有落地。
+
+补法是**新增第 8 个意图 `review_consult`**（不选"在意图内按关键词二次判定"）：
+两者查的不是同一个库，并进去就得在节点内部塞规则，规则难维护，而且会让
+`product_consult` 的置信度语义分裂——一半来自模型、一半来自规则。
+`review_consult` 同时进了 `FOCUSABLE`（评价按 SKU 存、doc 带 product_id，
+是标准的单商品锚定场景）。边界靠提示词里一对例子固定：
+"多久充一次电"是咨询（客观参数），"续航够用吗"是评价（使用体验）。
+
+⚠️ 注意评测集的覆盖边界：`eval.py` 有 12 条 `review_knowledge` 用例，但它们
+**直接指定了 collection**，测的是"给对了库能不能召回"，不是"Agent 会不会选对
+库"。所以新增意图这件事**评测集覆盖不到**，验证它的是 `intent.py` 自测里那对
+成对的用例（一条评价、一条必须留在咨询的探针）。

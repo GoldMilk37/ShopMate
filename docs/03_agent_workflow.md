@@ -9,7 +9,7 @@
 | 节点 | 职责 | 下一步 |
 |---|---|---|
 | intent_recognition | 识别用户意图 | 按意图路由 |
-| rag_retrieval | 商品咨询类检索 | generate_response |
+| rag_retrieval | 商品咨询 / 口碑评价类检索 | generate_response |
 | param_compare | 参数对比 | generate_response |
 | recommendation | 个性化推荐 | generate_response |
 | tool_calling | 业务查询/操作 | generate_response |
@@ -20,12 +20,19 @@
 
 | 意图 | 路由目标 | 触发条件 |
 |---|---|---|
-| 商品咨询 | rag_retrieval | 询问商品功能、材质、适用场景 |
+| 商品咨询 | rag_retrieval | 询问商品**客观信息**：功能、材质、参数、规格、适用场景 |
+| 用户评价 | rag_retrieval | 询问**主观体验**：口碑、评价、优缺点、值不值得买、别人怎么说 |
 | 参数对比 | param_compare | 涉及两个及以上商品对比 |
 | 个性化推荐 | recommendation | 表达购买需求但无明确商品 |
 | 订单查询 | tool_calling | 涉及订单号、物流、价格、库存 |
 | 售后处理 | tool_calling | 退换货、维修、投诉 |
 | 闲聊/其他 | generate_response | 无法归类 |
+
+> 商品咨询与用户评价是**同一节点、不同库**：前者查 `product_knowledge`，
+> 后者查 `review_knowledge`，生成端的侧重点也不同（咨询答事实，评价要好评
+> 差评两边都讲）。分成两个意图而不是在节点内做关键词二次判定，是因为
+> 规则难维护，且会让置信度语义分裂——一半来自模型、一半来自规则。
+> 边界拿不准时看问的是"它是什么"（咨询）还是"它好不好用"（评价）。
 
 ## 四、置信度与兜底
 

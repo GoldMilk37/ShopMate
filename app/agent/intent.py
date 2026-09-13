@@ -5,7 +5,7 @@
     IntentResult              结果数据类
     product_catalog()         SKU → 商品名的目录（给实体链接与上层复用）
 
-五个设计决策：
+六个设计决策：
     D1 意图集合 = 03 文档六类 + human_transfer：文档表里没有"用户点名
        转人工"，但 transfer_to_human 工具定义的第一条触发条件就是它，
        且这类请求必须零延迟直达——不过状态机、不让 LLM 编排，识别出
@@ -25,6 +25,13 @@
        链接（"这款耳机"→SKU-10001）。LLM 给的 PID 必须在本目录里，
        查不到就当没抽取——宁可不过滤，也别用一个幻觉出来的 ID 去把
        检索结果筛成空集。
+    D6 评价域单列第八个意图 review_consult：01 文档 §二 给评价单独建了
+       review_knowledge 库，但意图集原先只有三个 RAG 意图、全指向
+       product_knowledge——库建好了没人查，"XX 口碑怎么样"会拿商品详情
+       作答。补这一类是对 03 文档意图表的修订（性质同 D1 补 human_transfer）。
+       不并进 product_consult 是因为两者查的不是一个库：并进去就得在节点
+       内部塞"口碑/缺点/评价"关键词做二次判定，规则难维护，而且会让
+       product_consult 的置信度失去统一语义（一半来自模型、一半来自规则）。
 
 置信度阈值不在这里判——CLARIFY_THRESHOLD 的裁决权在状态机（它还
 要结合其他信号），本模块只负责"测出"置信度。
@@ -44,7 +51,8 @@ _SKU_RE = re.compile(r"sku-(\d+)", re.IGNORECASE)
 
 # 意图集合（D1）。值与 graph 的路由表一一对应。
 INTENTS = (
-    "product_consult",    # 商品咨询：功能/材质/适用场景
+    "product_consult",    # 商品咨询：客观信息（功能/材质/参数/场景）
+    "review_consult",     # 口碑评价：主观体验（优缺点/值不值得买）（D6）
     "param_compare",      # 参数对比：两个及以上商品对比
     "recommendation",     # 个性化推荐：有需求没明确商品
     "order_query",        # 订单查询：订单号/物流/价格/库存
@@ -54,14 +62,17 @@ INTENTS = (
 )
 
 SYSTEM_PROMPT = """你是电商客服的意图分类器。把用户消息分类并抽取信息，输出严格的 json 对象（不要输出其他内容）：
-{"intent": "product_consult|param_compare|recommendation|order_query|after_sale|human_transfer|chitchat",
+{"intent": "product_consult|review_consult|param_compare|recommendation|order_query|after_sale|human_transfer|chitchat",
  "confidence": 0到1的小数,
  "dissatisfied": true|false,
  "slots": {"product_name": "", "product_id": "", "order_id": "", "compare": [], "need": ""}}
 在售商品目录（product_id 只能从这里选）：
 {CATALOG}
 判定要点：
-- product_consult：问具体商品的功能、材质、参数、适用场景；price/stock 的实时数字属于 order_query
+- product_consult：问**客观信息**——功能、材质、参数、规格、适用场景；price/stock 的实时数字属于 order_query
+- review_consult：问**主观体验**——口碑、评价、优缺点、"值不值得买"、真实使用感受、别人怎么说。
+  同一件商品："多久充一次电"是 product_consult（客观参数），"续航够用吗"是 review_consult（使用体验）。
+  拿不准时看问的是"它是什么"还是"它好不好用"
 - param_compare：一句话里出现两个及以上要比的商品
 - recommendation：表达购买需求但没点名商品（"预算600求推荐"）
 - order_query：订单状态、物流进度、实时价格、实时库存
@@ -171,7 +182,11 @@ if __name__ == "__main__":
         sys.exit(0)
 
     cases = [   # (话术, 期望意图, 期望槽位非空)
+        # D6 的边界要成对测：只测"能认出评价"不够，还得测"没把客观咨询
+        # 误判成评价"。"续航"这个词两边都会出现，正好当探针。
         ("SKU-10001 这个耳机续航多久", "product_consult", "product_name"),
+        ("SKU-10001 这个耳机口碑怎么样 有什么缺点", "review_consult", None),
+        ("冲锋衣防水实测真的能挡雨吗", "review_consult", None),
         ("10001 和 20001 哪个降噪好", "param_compare", "compare"),
         ("预算六百，通勤用，求推荐个耳机", "recommendation", "need"),
         ("我的订单 ORD-20260901-001 到哪了", "order_query", "order_id"),
