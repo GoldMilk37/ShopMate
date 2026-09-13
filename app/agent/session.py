@@ -15,6 +15,9 @@
     D3 跨轮状态放 Session 而不是全局：不满计数（03 文档"连续 2 次"）、
        写操作待确认（executor 的 needs_confirmation 跨轮兑现）、工具
        连败计数，都是"这一个用户这一次会话"的事，换会话自动归零。
+    D4 话题商品锚点 current_product_id：跨记住"我们现在在聊哪件商品"，
+       这样下一句省主语的追问（"那它防水吗"）也能做 product_id 槽位
+       过滤。它属于"这一次会话"，寄存在全局会让两个用户串件。
 
 历史格式就是 OpenAI messages（{"role","content"}），可直接拼进请求。
 """
@@ -31,6 +34,7 @@ class Session:
     dissatisfaction: int = 0       # 连续表达不满的次数（03 文档 §4）
     pending_write: dict | None = None   # 待用户确认的写操作 {name, arguments}
     tool_fail_streak: int = 0     # 工具连续失败次数（03 文档 §4）
+    current_product_id: str = ""  # 当前话题商品（槽位过滤的锚点，见 D4）
 
     def append_round(self, user: str, assistant: str) -> None:
         """D2：成对追加并按轮截断。"""

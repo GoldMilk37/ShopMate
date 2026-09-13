@@ -23,9 +23,25 @@
        应当优先它。
     D5 兜底阈值在加权后判定：加权后最高分 < SCORE_THRESHOLD → 返回 []，
        上层（状态机）走"暂无相关信息"+转人工入口（03 状态机 §4）。
-      注意语义：schema.SCORE_THRESHOLD=0.02，换算一下——两路 rank1
-      齐中 ≈ 0.033（过），单路 rank1 ≈ 0.016（不过）。即"只有一条
-      路觉得非常相关"不足以过线，这是保守取向（宁可转人工，不硬答）。
+      注意语义（阈值已按评测结论调到 0.012）：单路 rank1 = 1/(60+1)
+      ≈ 0.0164（过线），两路 rank1 齐中 ≈ 0.0328（过线），单路 rank3
+      = 1/63 ≈ 0.0159（仍过），单路 rank4 起 ≈ 0.0156 以下就悬了。
+      即"某一条路把候选排得很靠前"就足以入围，不再像 0.02 那样要求
+      两条路同时认可——因为拦"巧合"的活已经交给 SEMANTIC_MAX_DIST
+      （向量硬门槛）和 MIN_LEXICAL_OVERLAP（词法置信门）了，阈值不该
+      一个人干三件事。
+
+    D6 元数据过滤两路同口径：where 在 Agent 层由槽位拼出（03 文档 §3
+       product_id），检索器只负责执行。向量路把 where 透传给 ChromaDB；
+       BM25 路必须在打分后先筛元数据子集、再在子集内重排号——若只在
+       最后按 meta 剪一刀，留下来的 rank 是全库排名，和已被约束的那一路
+       不可比，RRF 就失去意义了。这与 D3（余弦距离门槛后重排号）是同一
+       个原则：**排位必须反映"进入融合的候选"的次序**。
+    D7 只支持两种最简算子（相等 / $in），其余直接抛错：不支持却静默放行
+       等于退化成全库检索、给出看似有依据的错误答案，比报错更糟。
+    D8 话题商品用"重排+补充"而非独占过滤（见 search_with_product_focus）：
+       非商品文档的 product_id 是空串，独占过滤会把 faq/guide 整体排除，
+       把一个原本答对的 FAQ 问题改成答错。宁可只在排序层做倾斜。
 
 依赖链：search ⊂ indexer.get_collection/get_model/embed_texts（D1 伏笔）。
 命令行用法：python -m app.retrieval.retriever "查询词"
@@ -69,6 +85,13 @@ STOPWORDS = frozenset({
 # 相交——向量路没背书时，词法巧合是唯一的假命中来源，这道门专拦它。
 MIN_LEXICAL_OVERLAP = 2
 
+# 已用 where 锚定到具体商品时，这道门放宽到 1 个实词（D6 附则）：
+# 这道门的逻辑是"只有 BM25 一路认可，不够可信"；而 where 是第二重独立
+# 证据（这块资料确实属于用户正在聊的那件商品），两者叠加就够资格入围了。
+# 代价要写实：只放宽带过滤的那次检索，完全不碰无过滤路径，所以不会让
+# "量子涨落"这类无关 query 重新混进来。
+LEXICAL_OVERLAP_WHEN_FILTERED = 1
+
 
 def _tokenize(text: str) -> list[str]:
     """BM25 统一的分词口径（query 与语料都走这里）。"""
@@ -76,31 +99,45 @@ def _tokenize(text: str) -> list[str]:
 
 
 def search(query: str, collection: str = "product_knowledge",
-           top_k: int = TOP_K) -> list[dict]:
+           top_k: int = TOP_K, where: dict | None = None) -> list[dict]:
     """混合检索入口。返回降序 top_k：
 
         [{"chunk_id", "text", "score", "meta"}]
     最高加权重 < SCORE_THRESHOLD 时返回 []（D5，上层走兜底话术）。
+
+    where 是 Agent 层拼出的元数据过滤条件（D6），支持两种最简形式：
+        {"product_id": "SKU-10001"}        相等
+        {"brand": {"$in": ["A", "B"]}}     属于
+    不支持的算子抛 ValueError（D7）：静默退化成全库检索会让调用方拿到
+    一个像模像样但越界的答案，报错至少让人立刻知道。
     """
-    # 两路各自召回到候选排名（D3 的输入）
-    vector_ranks = _vector_route(query, collection, top_k)
-    bm25_ranks = _bm25_route(query, collection, top_k)
+    _validate_where(where)                              # D7：坏条件早失败
+
+    # 两路各自召回到候选排名（D3 的输入），两路都要受同一份 where 约束（D6）
+    vector_ranks = _vector_route(query, collection, top_k, where)
+    bm25_ranks = _bm25_route(query, collection, top_k, where)
     fused = _rrf([vector_ranks, bm25_ranks])
 
     # 词法置信门：向量路零支持的候选，词法巧合是唯一来源，要求 ≥2 个
     # 实词相交才保留（否则停用词级的弱匹配会污染兜底线之上的结果）。
+    # 带 where 时放宽到 1 个——"属于这件商品"是第二重证据（见 LEXICAL_...
+    # 常量处的说明）。评测里"打游戏延迟高不高"只有"延迟"一个实词和正解
+    # 块相交，正是靠这条才捞回来的。
     if bm25_ranks and not vector_ranks:
+        need = (LEXICAL_OVERLAP_WHEN_FILTERED if where else MIN_LEXICAL_OVERLAP)
         q_tokens = set(_tokenize(query))
         _, ids_all, docs_all, _ = _bm25_state(collection)
+        pos_all = {cid: i for i, cid in enumerate(ids_all)}
         fused = {cid: s for cid, s in fused.items()
-                 if len(q_tokens & set(_tokenize(docs_all[ids_all.index(cid)])))
-                 >= MIN_LEXICAL_OVERLAP}
+                 if len(q_tokens & set(_tokenize(docs_all[pos_all[cid]])))
+                 >= need}
 
     # D4：加权 → 排序 → D5 阈值 → 截断
     _, ids, docs, metas = _bm25_state(collection)      # 语料都在 D1 的缓存里
+    pos = {cid: i for i, cid in enumerate(ids)}        # 一次建索引，别反复 .index()
     scored: list[tuple[str, float]] = []
     for cid, s in fused.items():
-        w = DOC_TYPE_WEIGHTS.get(metas[ids.index(cid)].get("doc_type", ""), 1.0)
+        w = DOC_TYPE_WEIGHTS.get(metas[pos[cid]].get("doc_type", ""), 1.0)
         scored.append((cid, s * w))
     scored.sort(key=lambda x: x[1], reverse=True)
 
@@ -108,25 +145,31 @@ def search(query: str, collection: str = "product_knowledge",
         return []
 
     return [
-        {"chunk_id": cid, "text": docs[ids.index(cid)],
-         "score": round(s, 4), "meta": metas[ids.index(cid)]}
+        {"chunk_id": cid, "text": docs[pos[cid]],
+         "score": round(s, 4), "meta": metas[pos[cid]]}
         for cid, s in scored[:top_k]
     ]
 
 
 # ---------------- 两路召回 ----------------
 
-def _vector_route(query: str, collection: str, top_k: int) -> list[tuple[str, int]]:
+def _vector_route(query: str, collection: str, top_k: int,
+                  where: dict | None = None) -> list[tuple[str, int]]:
     """向量路：query 向量化 → ChromaDB 查询 → 距离门槛过滤。
 
-    只把 cosine 距离 ≤ SEMANTIC_MAX_DIST 的候选交给 RRF（两路合并阶段）。
-    过滤后重新排名：候选 #2 达标但 #3 不达标时，#2 记 rank 1——
-    排名必须反映"进入融合的候选"的次序，不能带洞。
+    where 直接交给 ChromaDB 在库内过滤（D6），命中集合天然是满足约束的
+    候选，后面的重排号逻辑与无过滤时完全一致。
     """
     coll = get_collection(collection)
     emb = embed_texts([query])[0]
-    hit = coll.query(query_embeddings=[emb], n_results=top_k,
-                     include=["distances"])
+    kw: dict = {"query_embeddings": [emb], "n_results": top_k,
+                "include": ["distances"]}
+    if where:
+        kw["where"] = where
+    hit = coll.query(**kw)
+    # 只把 cosine 距离 ≤ SEMANTIC_MAX_DIST 的候选交给 RRF（两路合并阶段）。
+    # 过滤后重新排名：候选 #2 达标但 #3 不达标时，#2 记 rank 1——
+    # 排名必须反映"进入融合的候选"的次序，不能带洞。
     out: list[tuple[str, int]] = []
     for cid, dist in zip(hit["ids"][0], hit["distances"][0]):
         if dist <= SEMANTIC_MAX_DIST:
@@ -134,13 +177,86 @@ def _vector_route(query: str, collection: str, top_k: int) -> list[tuple[str, in
     return out
 
 
-def _bm25_route(query: str, collection: str, top_k: int) -> list[tuple[str, int]]:
-    """BM25 路：统一口径分词后对建好的索引查询。返回 [(chunk_id, 排名)]。"""
-    bm25, ids, docs, _ = _bm25_state(collection)
+def _bm25_route(query: str, collection: str, top_k: int,
+                where: dict | None = None) -> list[tuple[str, int]]:
+    """BM25 路：统一口径分词后对建好的索引查询。返回 [(chunk_id, 排名)]。
+
+    BM25 索引是整库建的（D2 按 collection 缓存），所以 where 在打分之后
+    执行（D6）：先从全库得分里挑出元数据命中的候选，再在这个子集内部
+    重新排 1..top_k。若图省事后置到形成结果时才剪，剩下的就是全库排名。
+    """
+    bm25, ids, docs, metas = _bm25_state(collection)
     tokens = _tokenize(query)
     scores = bm25.get_scores(tokens)                   # 和每篇语料的打分 array
-    ranked = sorted(range(len(ids)), key=lambda i: scores[i], reverse=True)
-    return [(ids[i], r + 1) for r, i in enumerate(ranked[:top_k]) if scores[i] > 0]
+    cand = [i for i in range(len(ids))
+            if scores[i] > 0 and _match_meta(metas[i] or {}, where or {})]
+    ranked = sorted(cand, key=lambda i: scores[i], reverse=True)
+    return [(ids[i], r + 1) for r, i in enumerate(ranked[:top_k])]
+
+
+def search_with_product_focus(query: str, collection: str, product_id: str,
+                              top_k: int = TOP_K) -> list[dict]:
+    """已知话题商品时的检索：把它的资料顶到前面，但**不丢**其它候选。
+
+    为什么不用独占式 where 过滤：faq / guide / policy 这些非商品文档的元数据
+    里 product_id 是空串，独占过滤会把它们整体排除。可"耳机保修多长时间"的
+    正解恰恰是 faq 文档——那样做会把已经答对的问题改成答错。所以这里做的是
+    「重排 + 补充」，无过滤的全量结果永远保留：
+      1. 先无过滤检索得到 base（召回上界与原来完全一致，不可能退化）
+      2. base 里属于该商品的块整体提到最前（精度提升）
+      3. base 里该商品的块没占住前排（不足一半）→ 再按 product_id 过滤
+         检索一次补进来。"不足一半"是个粗但够用的信号：用户明显在问 X，
+         可 X 的资料连一半席位都占不到，说明裸相似度把它排到了别的东西
+         后面，这时候补一次检索是真的救命（评测里最后那条
+         "打游戏延迟高不高"就是这么救回来的：base 里有 X 的 spec 块，
+         但回答所需的 product 块被排到了 top5 之外）。
+    代价：走到第 3 步才多一次检索，满足第 2 步时零额外开销。
+    """
+    if not product_id:
+        return search(query, collection, top_k)
+    base = search(query, collection, top_k)
+    own = [h for h in base if (h["meta"].get("product_id") or "") == product_id]
+    others = [h for h in base if (h["meta"].get("product_id") or "") != product_id]
+    if base and len(own) * 2 >= top_k:          # 已经占住前排 → 纯重排，不再打扰
+        return (own + others)[:top_k]
+    # base 为空（连阈值都没过）或该商品没占住前排，都补一次带锚定的检索：
+    # 带 where 的那次会放宽词法门，常能把无过滤时被阈值杀掉的资料救回来。
+    extra = search(query, collection, top_k, where={"product_id": product_id})
+    seen = {h["chunk_id"] for h in own}         # 补进来的不能和已有的重复
+    extra = [h for h in extra if h["chunk_id"] not in seen]
+    return (own + extra + others)[:top_k]
+
+
+# ---------------- 元数据过滤（D6/D7） ----------------
+
+def _validate_where(where: dict | None) -> None:
+    """提前校验过滤条件，坏条件在检索开始前就炸，不要等到 RRF 里才发现。"""
+    if not where:
+        return
+    for key, cond in where.items():
+        if isinstance(cond, dict):
+            if set(cond) != {"$in"}:
+                raise ValueError(
+                    f"不支持的过滤算子 {sorted(set(cond))}（字段 {key}）："
+                    f"目前只实现对等的相等匹配与 $in")
+            if not isinstance(cond["$in"], (list, tuple)):
+                raise ValueError(f"字段 {key} 的 $in 必须是列表")
+
+
+def _match_meta(meta: dict, where: dict) -> bool:
+    """ChromaDB where 的最小实现：{"k": v} 相等 / {"k": {"$in": [...]}} 属于。
+
+    故意不支持 $and/$or/$ne 等：用不上先不实现，且由 _validate_where 在
+    入口挡住——半吊子实现比不支持更危险（D7）。
+    """
+    for key, cond in where.items():
+        val = meta.get(key)
+        if isinstance(cond, dict):
+            if val not in cond["$in"]:
+                return False
+        elif val != cond:
+            return False
+    return True
 
 
 # ---------------- 状态与融合 ----------------
@@ -203,3 +319,13 @@ if __name__ == "__main__":
             print(f"  ({tag[:70]}...)")   # 对照：混合排序 vs 两条单路各自的 top1
     print("\n提示：SKU-10001 那条应看出 BM25 把精确型号顶上来；"
           "量子那条必须返回[]，否则阈值形同虚设。")
+
+    # 用法三：元数据过滤（D6）——"这款耳机"指谁由 Agent 层的槽位决定
+    print("\n=== 元数据过滤对照（where product_id=SKU-10001）")
+    q, coll = "这款耳机有什么缺点", "review_knowledge"
+    for label, w in (("无过滤", None), ("过滤", {"product_id": "SKU-10001"})):
+        rs = search(q, coll, where=w)
+        head = " / ".join(r["chunk_id"].split("#")[0] for r in rs) or "[]"
+        print(f"  {label:3s} → {head}")
+    print("  过滤后应全部收敛到 review:SKU-10001；实际 Agent 层锚定哪个商品，"
+          "看 intent 抽到的 product_id 槽位。")

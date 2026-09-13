@@ -11,16 +11,21 @@
     D2 hit@5 判到文档级：chunk 命中后按 '#' 截断回 doc_id 再比对——
        评测问的是"找没找到对的资料"，不是"找没找到那一段"，段级
        命中率会随分块策略波动，文档级才反映用户可感知的质量。
-    D3 三路对照共用同一批 query 同一个 k：只有变量是检索方式，差值才
+    D3 多路对照共用同一批 query 同一个 k：只有变量是检索方式，差值才
        能归因给 RRF 融合与 doc_type 加权。纯向量/纯 BM25 直接复用
        retriever 的内部函数，保证对照的就是线上同一套代码。
     D4 评测集内嵌在代码里：50 条是人工整理的资产，diff 友好、可追溯
        每条标注的理由；量大后再挪 JSON/CSV 不迟（迁移只需改一个变量）。
 
+第四路 focus 对照的是 Agent 层的 product_id 槽位过滤（QUERY_FOCUS 标注
+该查询发出时用户正在聊的商品）。它的期望不是"越高越好"，而是**相对 hybrid
+非负**：要是出现负数，说明锚点把原本正确的答案挤出了 top5。
+
 用法：python -m app.retrieval.eval
-产出：三路 hit@5 对比 + 每路的未命中 query 清单（调阈值/加权前先看这个）。
+产出：多路 hit@5 对比 + 每路的未命中 query 清单（调阈值/加权前先看这个）。
 """
-from .retriever import search, _vector_route, _bm25_route, TOP_K
+from .retriever import search, search_with_product_focus
+from .retriever import _vector_route, _bm25_route, TOP_K
 
 # ---- 评测集（D1：可接受文档集合；顺序：query, collection, 期望 doc_id 集合） ----
 EVAL_SET: list[tuple[str, str, set[str]]] = [
@@ -81,6 +86,40 @@ EVAL_SET: list[tuple[str, str, set[str]]] = [
 ]
 
 
+# ---- 话题商品标注：这一条查询发出时，用户"正在聊哪件商品" ----
+# 语义等价于 Agent 层的 product_id 槽位（01 文档 §三的过滤输入）：真实对话里
+# 它来自前一句的型号或会话锚点，评测里由人工标注给出。没列进来的表示这句
+# 没有话题锚点（纯推荐/政策/跨商品 FAQ），只走普通混合检索。
+# 标注原则：只有当"用户明显在追问某一件已知商品"时才标——把跨商品的 FAQ
+# 问题硬安一个商品上去，是在给过滤刷分，不是在测它。
+QUERY_FOCUS: dict[str, str] = {
+    # product_knowledge
+    "SKU-10001 续航能用多久": "SKU-10001",
+    "冲锋衣防水指数静水压是多少": "SKU-30001",
+    "冲锋衣可以用柔顺剂洗吗": "SKU-30001",
+    "170 的身高穿 L 码胸围多少": "SKU-30001",
+    "洗衣机晚上洗噪音会不会吵到人": "SKU-40001",
+    "这款耳机能用来专业录音监听吗": "SKU-10001",
+    "冲锋衣本身有多重": "SKU-30001",
+    "打游戏延迟高不高": "SKU-10001",
+    "洗衣机用的什么电机": "SKU-40001",
+    "冲锋衣有什么颜色和尺码": "SKU-30001",
+    # review_knowledge
+    "SKU-10001 这个耳机口碑怎么样": "SKU-10001",
+    "这款耳机有什么缺点": "SKU-10001",
+    "降噪实际体验怎么样 坐地铁": "SKU-10001",
+    "冲锋衣防水实测如何 真的能挡雨吗": "SKU-30001",
+    "冲锋衣夏天穿会不会闷": "SKU-30001",
+    "压胶洗完会起泡吗": "SKU-30001",
+    "冲锋衣好买吗 会不会断码": "SKU-30001",
+    "洗烘一体机用过的人怎么说": "SKU-40002",
+    "这台洗衣机评价怎么样": "SKU-40001",
+    "充电盒体积大吗 好携带吗": "SKU-10001",
+    "耳机触控会不会误触": "SKU-10001",
+    "冲锋衣版型穿起来好看吗": "SKU-30001",
+}
+
+
 def _hit(query: str, collection: str, allowed: set[str],
          route) -> tuple[bool, list[str]]:
     """route(query, coll, k) → [(chunk_id, rank)]；判文档级命中（D2）。"""
@@ -97,32 +136,44 @@ def main() -> None:
     assert len(EVAL_SET) >= 50, f"评测集不足 50 条: {len(EVAL_SET)}"
 
     # 预热两个懒加载资源（BM25 索引 / BGE-M3），否则首轮计时失真无妨、首轮报错难查
-    modes: dict[str, list[tuple[bool, list[str]]]] = {"vector": [], "bm25": [], "hybrid": []}
-    misses: dict[str, list[str]] = {"vector": [], "bm25": [], "hybrid": []}
+    modes: dict[str, list[tuple[bool, list[str]]]] = {"vector": [], "bm25": [], "hybrid": [], "focus": []}
+    misses: dict[str, list[str]] = {"vector": [], "bm25": [], "hybrid": [], "focus": []}
+
+    def hybrid_route(query, c, k):
+        return [(r["chunk_id"], i) for i, r in enumerate(search(query, c), 1)]
+
+    def focus_route(query, c, k):
+        """第四路：混合 + 话题商品倾斜（Agent 层 product_id 槽位的落地形态）。"""
+        return [(r["chunk_id"], i)
+                for i, r in enumerate(
+                    search_with_product_focus(query, c, QUERY_FOCUS.get(query, "")), 1)]
 
     for q, coll, allowed in EVAL_SET:
         h_v, _ = _hit(q, coll, allowed, _vector_route)
         h_b, _ = _hit(q, coll, allowed, _bm25_route)
-        h_m, _ = _hit(q, coll, allowed,
-                      lambda query, c, k: [(r["chunk_id"], i)
-                                           for i, r in enumerate(search(query, c), 1)])
-        for name, h in (("vector", h_v), ("bm25", h_b), ("hybrid", h_m)):
+        h_m, _ = _hit(q, coll, allowed, hybrid_route)
+        h_f, _ = _hit(q, coll, allowed, focus_route)
+        for name, h in (("vector", h_v), ("bm25", h_b), ("hybrid", h_m), ("focus", h_f)):
             modes[name].append((h, []))
             if not h:
                 misses[name].append(f"[{coll.split('_')[0]}] {q}  期望:{sorted(allowed)}")
 
     n = len(EVAL_SET)
-    print(f"评测集 {n} 条，hit@5 三路对比（01 文档 §7）：")
+    print(f"评测集 {n} 条，hit@5 多路对比（01 文档 §7）：")
     base = None
-    for name in ("vector", "bm25", "hybrid"):
+    hits_of: dict[str, int] = {}
+    for name in ("vector", "bm25", "hybrid", "focus"):
         hits = sum(1 for h, _ in modes[name] if h)
+        hits_of[name] = hits
         print(f"  {name:8s} {hits}/{n} = {hits / n:.0%}")
         if name == "bm25":
             base = hits / n
-    print(f"\n混合 vs 纯 BM25 提升: {(sum(1 for h, _ in modes['hybrid'] if h) / n - base):+.0%}"
+    print(f"\n混合 vs 纯 BM25 提升: {(hits_of['hybrid'] / n - base):+.0%}"
           f"（目标 ≥85% 且 +30%，见 01 文档 §一/§七）")
+    print(f"话题倾斜 vs 混合: {hits_of['focus'] - hits_of['hybrid']:+d} 条"
+          f"（应为正或 0；出现负数说明锚点挤掉了正确答案，必须回查）")
 
-    for name in ("vector", "bm25", "hybrid"):
+    for name in ("vector", "bm25", "hybrid", "focus"):
         if misses[name]:
             print(f"\n--- {name} 未命中 {len(misses[name])} 条 ---")
             for m in misses[name]:

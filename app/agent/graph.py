@@ -39,6 +39,10 @@
     D7 兜底动作收敛到一个 _transfer()：三种触发源（点名/连败/不满）
        复用同一段落地逻辑，summary 参数取最近对话，正好满足工具
        定义里"附最近对话摘要"的要求。
+    D8 话题商品锚点驱动检索倾斜：意图抽出 product_id（或沿用 Session
+       记住的上文锚点）后调用 retriever.search_with_product_focus，
+       把该商品的资料重排到前面。刻意不用独占式过滤——见检索器 D8，
+       那会把 product_id 为空的 faq/guide 整体排除，反而答错更多。
 
 依赖链：handle ⊂ intent.classify + retrieval.search + tools.executor + llm.chat。
 入口：python -m app.agent.cli（人机对话）；python -m app.agent.graph（自测）。
@@ -48,6 +52,7 @@ import time
 
 from ..llm import client as llm
 from ..retrieval.retriever import search as rag_search
+from ..retrieval.retriever import search_with_product_focus
 from ..tools.registry import get_schemas
 from ..tools.executor import execute as tool_execute
 from .intent import classify, IntentResult
@@ -87,6 +92,28 @@ RAG_MODES = {
     "recommendation":  ("product_knowledge",
                         "用户在求推荐：按需求先给 1-2 个商品，每个用资料里的卖点说清'为什么适合他'，并主动问一个能缩小范围的问题。"),
 }
+
+# D8：只有「单商品」意图 + 带商品维度的库才做话题倾斜。
+# 对比类天然是两个商品，政策/指南库没有 product_id，套上去只会帮倒忙。
+FOCUSABLE = {"product_consult"}
+
+
+def _anchored_product(hits: list[dict]) -> str:
+    """从本轮命中里挑出话题商品，作为下一轮的锚点（下一句可以省主语）。
+
+    只认出现 ≥2 次的商品ID：单块命中可能是"顺带提了另一个型号"的噪音，
+    拿它当锚点会把后续对话引到错误商品上。取不到就返回空串——锚点宁可
+    丢一次，不可锚错一次（锚错会一路把检索结果带偏）。
+    """
+    counts: dict[str, int] = {}
+    for h in hits:
+        pid = h["meta"].get("product_id") or ""
+        if pid:
+            counts[pid] = counts.get(pid, 0) + 1
+    if not counts:
+        return ""
+    pid, n = max(counts.items(), key=lambda kv: kv[1])
+    return pid if n >= 2 else ""
 
 
 class Agent:
@@ -142,10 +169,16 @@ class Agent:
         elif ir.intent == "recommendation" and ir.slots.get("need"):
             query = f"选购 {ir.slots['need']} 推荐"
 
-        hits = rag_search(query, collection)
+        # D8 话题商品倾斜：本句抽到的型号优先，抽不到就用会话里记住的锚点
+        focus = ""
+        if ir.intent in FOCUSABLE:
+            focus = ir.slots.get("product_id") or s.current_product_id
+        hits = (search_with_product_focus(query, collection, focus)
+                if focus else rag_search(query, collection))
         if not hits:                                     # 兜底2：检索空
             s.append_round(text, NO_INFO_REPLY)
             return NO_INFO_REPLY
+        s.current_product_id = _anchored_product(hits) or s.current_product_id
 
         docs = "\n\n".join(
             f"【资料{i}】({h['meta'].get('doc_type', '')} | {h['meta'].get('product_id', '')})\n{h['text']}"
