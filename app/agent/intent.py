@@ -5,7 +5,7 @@
     IntentResult              结果数据类
     product_catalog()         SKU → 商品名的目录（给实体链接与上层复用）
 
-六个设计决策：
+七个设计决策：
     D1 意图集合 = 03 文档六类 + human_transfer：文档表里没有"用户点名
        转人工"，但 transfer_to_human 工具定义的第一条触发条件就是它，
        且这类请求必须零延迟直达——不过状态机、不让 LLM 编排，识别出
@@ -32,6 +32,13 @@
        不并进 product_consult 是因为两者查的不是一个库：并进去就得在节点
        内部塞"口碑/缺点/评价"关键词做二次判定，规则难维护，而且会让
        product_consult 的置信度失去统一语义（一半来自模型、一半来自规则）。
+    D7 出网失败与解析失败分开处理，且都留痕：原先一个 try 包住了"调模型"
+       和"解析 JSON"两件事，两种失败在输出上完全一样（都是 confidence=0），
+       所以自测 9 条全判 chitchat 那次看起来像分类器坏了——实际是 TLS 握手
+       被中间设备掐断（见 llm.client D4）。重试本身交给 llm.safe_call
+       （策略收口在 LLM 层，不在这里再养一份）；本层负责的是：每一处降级
+       都打印**具体是哪一步、坏在什么值上**。代价是一段代码分成两截，
+       收益是下次网络出事能在 10 秒内定位，而不是从"分类器坏了"倒着查。
 
 置信度阈值不在这里判——CLARIFY_THRESHOLD 的裁决权在状态机（它还
 要结合其他信号），本模块只负责"测出"置信度。
@@ -136,9 +143,51 @@ def _resolve_product_id(text: str, slots: dict) -> str:
     return pid if pid in product_catalog() else ""
 
 
+def _parse(raw: str, text: str) -> IntentResult:
+    """D7：把模型吐的 JSON 变成 IntentResult。每一处降级各留各的痕。
+
+    和"调模型"分开的理由见 D7——混在一起时，"网络断了"和"JSON 坏了"
+    对调用方长得一模一样。
+    """
+    try:
+        d = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as e:
+        print(f"[intent] JSON 解析失败，按未知处理: {type(e).__name__}: {e}；"
+              f"原文={raw[:120]!r}")
+        return IntentResult()
+    if not isinstance(d, dict):
+        print(f"[intent] 模型返回的不是对象（{type(d).__name__}），按未知处理")
+        return IntentResult()
+
+    intent = d.get("intent", "")
+    if intent not in INTENTS:
+        print(f"[intent] 模型给了意图集外的名字 {intent!r}，按未知处理")
+        return IntentResult()
+
+    try:
+        conf = float(d.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        # 意图认得，但把握给成了非数字。保守取 0：状态机会再追问一句，
+        # 总比拿一个编出来的把握去路由强。
+        print(f"[intent] confidence 不是数字（{d.get('confidence')!r}），按下限 0 处理")
+        conf = 0.0
+
+    slots = d.get("slots")
+    if not isinstance(slots, dict):
+        if slots is not None:
+            print(f"[intent] slots 不是对象（{type(slots).__name__}），按空槽位处理")
+        slots = {}
+    slots["product_id"] = _resolve_product_id(text, slots)
+    return IntentResult(intent, max(0.0, min(1.0, conf)),
+                        bool(d.get("dissatisfied", False)), slots)
+
+
 def classify(text: str, history: list[dict] | None = None) -> IntentResult:
     """识别意图。LLM/解析任何环节出问题都返回 confidence=0（D3），
-    不向上抛异常——状态机的兜底分支就是为这种时刻准备的。"""
+    不向上抛异常——状态机的兜底分支就是为这种时刻准备的。
+
+    D7：调模型（含重试，走 llm.safe_call）与解析分成两截，各报各的错。
+    """
     # D4：只带最近 4 条 user 消息作指代消解的上下文
     recent = [m["content"] for m in (history or [])[-8:] if m["role"] == "user"][-4:]
     context = ("\n近期对话（仅供消解指代，如\"它/这个\"指什么）：\n"
@@ -147,18 +196,17 @@ def classify(text: str, history: list[dict] | None = None) -> IntentResult:
         {"role": "system", "content": _system_prompt()},   # 带商品目录
         {"role": "user", "content": f"用户消息：{text}{context}"},
     ]
+
+    msg = llm.safe_call(llm.chat, messages, temperature=0.0, json_mode=True)
+    if msg is None:                     # 重试过仍失败；真实异常 safe_call 已打印
+        return IntentResult()
+
     try:
-        raw = llm.chat(messages, temperature=0.0, json_mode=True).content or ""
-        d = json.loads(raw)
-        intent = d.get("intent", "")
-        if intent not in INTENTS:                       # 幻觉出的意图名按未知处理
-            return IntentResult()
-        conf = float(d.get("confidence", 0.0))
-        slots = d.get("slots") if isinstance(d.get("slots"), dict) else {}
-        slots["product_id"] = _resolve_product_id(text, slots)
-        return IntentResult(intent, max(0.0, min(1.0, conf)),
-                            bool(d.get("dissatisfied", False)), slots)
-    except Exception:                                   # 网络/JSON/类型，全按 D3
+        return _parse(msg.content or "", text)
+    except Exception as e:              # D3 的契约：绝不向上抛
+        # 走到这儿说明坏在解析路径的意料之外处（例如 specs/ 里的 JSON 读不动）。
+        # 契约不变，但照样留痕——否则又是一次"全变 chitchat"的无头案。
+        print(f"[intent] 解析兜底触发，按未知处理: {type(e).__name__}: {e}")
         return IntentResult()
 
 
@@ -176,6 +224,20 @@ if __name__ == "__main__":
     assert _resolve_product_id("下单一件", {"product_id": "SKU-10001"}) == "SKU-10001"
     print(f"型号抽取（无需 key）: 目录 {len(product_catalog())} 个 SKU，"
           "正则命中 / 目录外ID丢弃 全部 OK\n")
+
+    # ---- D7：解析降级各走各的路径（不联网，直接喂坏 JSON） ----
+    # 这五条是"出网正常但模型不老实"的现场。原先它们和网络故障共用一个
+    # except，测了也分不清谁是谁——现在每条都能单独断言。
+    assert _parse("这不是 json", "随便问问").confidence == 0.0
+    assert _parse('["数组，不是对象"]', "随便问问").confidence == 0.0
+    assert _parse('{"intent": "free_refund", "confidence": 0.9}', "随便问问").confidence == 0.0
+    _r = _parse('{"intent": "product_consult", "confidence": "很高"}', "SKU-10001 续航多久")
+    assert _r.intent == "product_consult" and _r.confidence == 0.0, _r
+    _r = _parse('{"intent": "product_consult", "confidence": 0.9, "slots": "无"}',
+                "SKU-10001 续航多久")
+    assert _r.confidence == 0.9 and _r.slots["product_id"] == "SKU-10001", _r
+    print("解析降级（无需 key）: 坏JSON / 非对象 / 意图集外 / confidence非数字 / "
+          "slots非对象 —— 五条路径均按预期降级\n")
 
     if not os.environ.get("DEEPSEEK_API_KEY"):
         print("跳过：.env 里没有 DEEPSEEK_API_KEY（client.py 已自测过缺 key 路径）")

@@ -43,11 +43,11 @@
        记住的上文锚点）后调用 retriever.search_with_product_focus，
        把该商品的资料重排到前面。刻意不用独占式过滤——见检索器 D8，
        那会把 product_id 为空的 faq/guide 整体排除，反而答错更多。
-    D9 LLM 出网失败一律降级、不裸抛：连接类抖动（超时/断连/限流）重试
-       一次，仍失败就返回 None 交给调用方，各支路给各自的兜底话术。
-       不统一文案是因为"资料里没有"和"服务没连上"对用户是两回事——
-       混成一句会让用户以为我们真的查不到这个商品的信息。认证/参数类
-       错误不重试：重试一万次也是同样结果，只会让用户白等。
+    D9 LLM 出网失败一律降级、不裸抛：重试与判据由 LLM 层统一实现
+       （client.safe_call，见其 D4——策略放那儿是因为 intent 也要用同一套，
+       各养一份迟早会漂），本层只负责按支路给各自的兜底话术。不统一
+       文案是因为"资料里没有"和"服务没连上"对用户是两回事——混成一句
+       会让用户以为我们真的查不到这个商品的信息。
 
 依赖链：handle ⊂ intent.classify + retrieval.search + tools.executor + llm.chat。
 入口：python -m app.agent.cli（人机对话）；python -m app.agent.graph（自测）。
@@ -89,39 +89,6 @@ NO_INFO_REPLY = ("这一点我暂时没有准确信息，为避免误导就不�
 # 那句的意思是"资料里没有"，这句的意思是"我没连上"，对用户是两回事。
 LLM_FAIL_REPLY = ("抱歉，我这边刚才没能连上后台服务，这个问题没能答上。"
                   "您可以再说一遍，或输入「转人工」由人工客服帮您处理。")
-
-# 哪些异常值得重试：只认连接类抖动。不 import openai 的异常类，一是本模块
-# 的离线自测至今不依赖 openai 装没装（client.py 是懒加载的），二是 httpx
-# 的异常同样会冒上来，按类名一并兜住。
-_RETRYABLE_HINTS = ("Timeout", "Connection", "RateLimit", "APIStatus",
-                    "InternalServer", "ServiceUnavailable")
-
-
-def _retryable(e: Exception) -> bool:
-    """按异常类名判断是否值得重试（见 D9 的取舍说明）。"""
-    name = type(e).__name__
-    return any(h in name for h in _RETRYABLE_HINTS)
-
-
-def _safe_llm(fn, *args, **kwargs):
-    """D9：LLM 调用的统一兜底。抖动重试一次，仍失败返回 None。
-
-    返回 None 而不是直接给话术，是因为三个调用点的降级文案不一样，
-    一刀切会让用户看到文不对题的回复（见 LLM_FAIL_REPLY 的说明）。
-    """
-    last: Exception | None = None
-    for attempt in range(2):
-        try:
-            return fn(*args, **kwargs)
-        except Exception as e:                  # 兜底就是要兜住全部，包括 openai 的各类异常
-            last = e
-            if attempt == 0 and _retryable(e):
-                time.sleep(0.8)                 # 只等一次，别把用户晾在这儿
-                continue
-            break
-    print(f"[graph] LLM 调用失败，已降级: {type(last).__name__}: {last}")
-    return None
-
 
 # D1：确认门的关键词（判定顺序：先否后肯，"不要"必须落在否定上）
 YES_WORDS = ("确认", "确定", "是的", "好的", "好", "嗯", "可以", "要", "对", "继续", "办", "申请")
@@ -237,7 +204,7 @@ class Agent:
             *s.history,
             {"role": "user", "content": f"【资料】\n{docs}\n\n【用户问题】{text}"},
         ]
-        raw = _safe_llm(llm.chat_text, messages)         # D9
+        raw = llm.safe_call(llm.chat_text, messages)     # D9
         if raw is None:
             reply = LLM_FAIL_REPLY          # 压根没答上：不是"资料没有"，别说错话
         else:
@@ -260,7 +227,7 @@ class Agent:
             {"role": "user", "content": text},
         ]
         for _ in range(MAX_TOOL_ROUNDS):                 # D6
-            msg = _safe_llm(llm.chat, messages, tools=get_schemas())   # D9
+            msg = llm.safe_call(llm.chat, messages, tools=get_schemas())   # D9
             if msg is None:                              # 编排断了≠工具失败，不记连败
                 s.append_round(text, LLM_FAIL_REPLY)
                 return LLM_FAIL_REPLY
@@ -358,7 +325,7 @@ class Agent:
     def _free_chat(self, s: Session, text: str) -> str:
         messages = [{"role": "system", "content": PERSONA},
                     *s.history, {"role": "user", "content": text}]
-        reply = _safe_llm(llm.chat_text, messages, temperature=0.7) or LLM_FAIL_REPLY
+        reply = llm.safe_call(llm.chat_text, messages, temperature=0.7) or LLM_FAIL_REPLY
         s.append_round(text, reply)
         return reply
 
@@ -407,32 +374,14 @@ if __name__ == "__main__":
     print("转人工落地 + 写历史:", r)
 
     # ---- LLM 故障降级（D9，不联网：用会抛异常的桩替掉真实调用） ----
+    # 重试判据本身不在这里测——策略已收口到 llm.client（其自测覆盖）。这里
+    # 只验本层的责任：整条支路在 LLM 挂掉时给降级话术，而不是把异常抛给用户。
     class _FakeConnTimeout(Exception):
         pass
 
-    class _FakeAuthError(Exception):
-        pass
-
-    conn_calls: list[int] = []
-
     def _conn_fail(*a, **k):
-        conn_calls.append(1)
         raise _FakeConnTimeout("连接超时")
 
-    assert _safe_llm(_conn_fail) is None
-    assert len(conn_calls) == 2, f"连接类异常应重试一次（共 2 次），实际 {len(conn_calls)}"
-
-    auth_calls: list[int] = []
-
-    def _auth_fail(*a, **k):
-        auth_calls.append(1)
-        raise _FakeAuthError("key 无效")
-
-    assert _safe_llm(_auth_fail) is None
-    assert len(auth_calls) == 1, f"认证类错误不该重试，实际调用 {len(auth_calls)} 次"
-    print(f"LLM 降级: 抖动重试 {len(conn_calls)} 次 / 认证错误只试 1 次，均返回 None")
-
-    # 端到端：整条闲聊支路在 LLM 挂掉时给降级话术，而不是把异常抛给用户
     orig_chat_text = llm.chat_text
     llm.chat_text = _conn_fail                            # 桩（_free_chat 在调用时才取属性）
     try:
