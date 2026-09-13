@@ -18,6 +18,14 @@
     D4 话题商品锚点 current_product_id：跨记住"我们现在在聊哪件商品"，
        这样下一句省主语的追问（"那它防水吗"）也能做 product_id 槽位
        过滤。它属于"这一次会话"，寄存在全局会让两个用户串件。
+    D5 trace 是"报告"不是"状态"：它记录本轮走到了哪个分支、意图置信度、
+       召回了哪些块，供前端展示与检索埋点使用。三条纪律：
+       一是**不进 prompt**——history 仍是唯一喂给 classify 和 messages 的
+       东西，混进去会让 LLM 看到自己的诊断信息；二是**不进将来的 Redis
+       chat:ctx 序列化**（04 文档），它是可再生的观测数据，没必要跟着会话
+       持久化；三是每轮由 Agent.handle **重新绑定**而非原地 clear——前端
+       上一轮抓着的引用要还能指向那份完整的旧轨迹。字段本身用 dict 而不是
+       数据类：加一个键不该要改 N 处，且前端要的本来就是可序列化的 dict。
 
 历史格式就是 OpenAI messages（{"role","content"}），可直接拼进请求。
 """
@@ -35,6 +43,7 @@ class Session:
     pending_write: dict | None = None   # 待用户确认的写操作 {name, arguments}
     tool_fail_streak: int = 0     # 工具连续失败次数（03 文档 §4）
     current_product_id: str = ""  # 当前话题商品（槽位过滤的锚点，见 D4）
+    trace: dict = field(default_factory=dict)   # 本轮诊断轨迹（D5：报告，非跨轮状态）
 
     def append_round(self, user: str, assistant: str) -> None:
         """D2：成对追加并按轮截断。"""
@@ -74,4 +83,12 @@ if __name__ == "__main__":
 
     store.drop("t1")
     assert store.get("t1").history == [], "drop 后是全新会话"
-    print("自测通过：同实例复用 / 10 轮成对截断 / drop 重置")
+
+    # D5：trace 是每会话独立的报告，且不参与历史
+    assert Session().trace == {}, "新会话的 trace 应是空 dict"
+    a, b = store.get("ta"), store.get("tb")
+    a.trace["stage"] = "rag"
+    assert b.trace == {}, "两个会话的 trace 必须互不影响"
+    assert all(set(m) == {"role", "content"} for m in a.history), \
+        "trace 不得混进 history（history 只喂 prompt）"
+    print("自测通过：同实例复用 / 10 轮成对截断 / drop 重置 / trace 与会话一一对应")

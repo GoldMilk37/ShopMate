@@ -17,8 +17,10 @@ jieba==0.42.1            # 中文分词，BM25 建索引和查询两侧都用
 # --- LLM 层 ---
 openai==3.13.0           # DeepSeek 走 OpenAI 兼容协议（client.py 懒加载）
 
-# --- 规划中，做前端/换存储时再取消注释 ---
-# streamlit    # 演示前端
+# --- 演示前端 ---
+streamlit==1.63.0        # app/agent/webui.py；测试用的 AppTest 也在这个包里
+
+# --- 规划中，换存储/拆服务时再取消注释 ---
 # fastapi      # 服务层（若前后端分离）
 # uvicorn      # FastAPI 的 ASGI 服务器
 # PyMySQL      # 替换 SQLite

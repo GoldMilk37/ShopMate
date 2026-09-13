@@ -3,15 +3,19 @@
 > 面向电商平台的智能客服 Agent：RAG 商品知识库检索 + Function Calling 业务系统调用，
 > 覆盖商品咨询、参数对比、个性化推荐、订单查询、售后处理全场景。
 
-**当前状态**（2026-09-13）：RAG 层、工具层、Agent 层三层已打通，离线自测全绿，
-检索评测 50 条集 hit@5 达到 **100%**。可直接 `python -m app.agent.cli` 跑人机对话。
+**当前状态**（2026-09-13）：四层全部打通，离线自测全绿，检索评测 50 条集 hit@5 达到 **100%**。
+终端对话 `python -m app.agent.cli`，浏览器演示 `streamlit run app/agent/webui.py`——
+后者把每轮**内部状态**（意图/置信度、检索召回与引用判定、工具调用、命中的兜底）摊在侧栏上，
+是"点得开、看得见"的那个版本。
 
 | 层 | 状态 | 自测入口 |
 |---|---|---|
 | RAG 检索（混合 + 话题商品锚点） | 已完成 | `python -m app.retrieval.eval` |
+| 检索埋点（每轮检索落 JSONL） | 已完成 | `python -m app.retrieval.telemetry` |
 | 工具层（6 工具，读写分级 + 确认门） | 已完成 | `python -m app.tools.executor` |
 | Agent 层（8 类意图 + 状态机 + 会话记忆） | 已完成 | `python -m app.agent.intent` / `.graph` |
-| 演示前端（Streamlit） | 计划中 | — |
+| 本轮轨迹契约与渲染 | 已完成 | `python -m app.agent.trace_view` |
+| 演示前端（Streamlit） | 已完成 | `python -m app.agent.webui --e2e` |
 | MySQL / Redis 接入 | 主动不做（见文末「明确不做」） | — |
 
 ## 架构
@@ -44,6 +48,11 @@
    回复生成 ── 检索为空 / LLM 异常 ──▶ 兜底话术或转人工
 ```
 
+每一轮走完，走过的分支、意图与置信度、召回块与引用判定、工具调用、命中的兜底，
+都被记进 `Session.trace`：前端侧栏照着它画，CLI 用 `/trace` 打印，RAG 轮另落一行
+`data/logs/retrieval.jsonl`。轨迹是**报告**不是状态——不进 prompt、不进将来的 Redis
+会话序列化，每轮重新绑定（不是清空），所以前端上一轮抓着的引用仍然完整。
+
 三个知识域各自独立建库（`product_knowledge` / `policy_knowledge` / `review_knowledge`），
 按**知识域**而非文档类型切分——评价是口语化文本，与商品详情混在一库会污染商品咨询的相似度。
 
@@ -58,6 +67,7 @@ ShopMate/
 │   │   ├── chunker.py      #   按文档类型分块（六种切法）→ 124 chunk
 │   │   ├── indexer.py      #   BGE-M3 向量化 + ChromaDB 持久化入库
 │   │   ├── retriever.py    #   向量+BM25 混合检索、RRF 融合、元数据过滤
+│   │   ├── telemetry.py    #   检索埋点：每轮落一行 JSONL + 引用代理指标
 │   │   └── eval.py         #   50 条评测集，四路 hit@5 对照
 │   ├── tools/              # Function Calling 工具层
 │   │   ├── registry.py     #   加载 JSON 工具定义，读写分级（WRITE_OPS）
@@ -65,8 +75,10 @@ ShopMate/
 │   │   └── executor.py     #   执行编排：确认门 / 超时 / 缓存 / 异常收敛
 │   ├── agent/              # Agent 状态机
 │   │   ├── intent.py       #   意图识别：8 类 + 置信度 + product_id 槽位
-│   │   ├── graph.py        #   状态机主体：确认门 / 四条兜底 / 工具编排
+│   │   ├── graph.py        #   状态机主体：确认门 / 四条兜底 / 工具编排 / 本轮轨迹
 │   │   ├── session.py      #   会话记忆（进程内存版，接口按 Redis 设计）
+│   │   ├── trace_view.py   #   本轮轨迹的键名契约 + 渲染（CLI 与前端共用）
+│   │   ├── webui.py        #   Streamlit 演示前端：对话 + 侧栏摊开内部状态
 │   │   └── cli.py          #   命令行交互入口
 │   └── llm/
 │       └── client.py       #   DeepSeek 封装（OpenAI 兼容）+ json_mode
@@ -80,13 +92,13 @@ ShopMate/
 │   │   └── guides/         #   选购指南 ×3
 │   ├── tools/              # 工具定义 JSON ×6
 │   ├── chroma/             # ChromaDB 持久化目录（3 collection）
-│   └── logs/               # 工具调用日志（jsonl）
+│   └── logs/               # 运行日志（jsonl）：工具调用 + 每轮检索埋点
 ├── docs/                   # 设计文档（决策依据都在这里）
 │   ├── 01_rag_knowledge_base.md   # 知识库：分域/分块/混合检索/评测结论
 │   ├── 02_tool_definitions.md     # 工具总览与调用原则（只读/写操作分级）
 │   ├── 03_agent_workflow.md       # 状态机：意图路由/置信度兜底/上下文管理
 │   └── 04_data_schema.md          # 元数据/Collection/MySQL/Redis 规范
-├── requirements.txt        # 只列直接依赖（5 个），不是 pip freeze 转储
+├── requirements.txt        # 只列直接依赖（6 个），不是 pip freeze 转储
 ├── .env.example            # key / 代理的填写模板，复制成 .env 用
 ├── LICENSE
 └── README.md
@@ -109,9 +121,12 @@ cp .env.example .env             # Windows cmd 用 copy .env.example .env
 # 3. 离线自测（不联网、不依赖 key）
 python -m app.retrieval.loader    # 应打印：共加载 32 个文档 + SKU-10001 当前价 599
 python -m app.retrieval.chunker   # 应打印：124 个 chunk + 三项断言全通过
+python -m app.retrieval.telemetry # 引用判定代理指标：锚点误报用例 + 落盘/开关
 python -m app.tools.registry      # 应打印：6 个工具 + 读写分级
 python -m app.tools.executor      # 应打印：9 项断言全通过（含缓存按用户隔离、越权防护）
 python -m app.agent.session       # 应打印：10 轮成对截断
+python -m app.agent.trace_view    # 轨迹渲染：标签覆盖 + 半成品轨迹不抛
+python -m app.agent.webui --e2e   # 前端无头端到端（AppTest，同样不联网）
 
 # 4. 建库（首次会从 HuggingFace 拉 BGE-M3，之后离线可用）
 python -m app.retrieval.indexer
@@ -123,8 +138,17 @@ python -m app.retrieval.eval
 # 6. 跑 Agent（需 key）
 python -m app.agent.intent        # 意图分类 9 条用例 + 解析降级 5 条断言（后者不需 key）
 python -m app.agent.graph         # 状态机冒烟（含确认门、工具编排、转人工）
-python -m app.agent.cli           # 人机对话；/new 换会话 /history 看记忆 /exit 退出
+python -m app.agent.cli           # 人机对话；/new 换会话 /history 看记忆 /trace 看本轮状态
+
+# 7. 浏览器演示（需 key；首次检索要加载 BGE-M3，十几秒）
+streamlit run app/agent/webui.py  # 侧栏能点开看本轮内部状态；有「预热模型」按钮
 ```
+
+> 前端怎么验：`python -m app.agent.webui --e2e` 是**真正的**端到端——它用
+> `streamlit.testing.v1.AppTest` 在同进程里执行整个脚本（桩掉检索与 LLM，全程离线），
+> 断言脚本真的跑起来了、一问一答进了会话、侧栏把轨迹画出来了。
+> 而 `curl /_stcore/health` 返回 200 **只说明服务器启动成功**：脚本要等 websocket
+> 连上才执行，所以健康探测证明不了应用正确。两者别互相替代。
 
 > **环境坑**：系统 Python 缺 `jieba` 等依赖，一律用 `.venv/Scripts/python.exe` 跑。
 > BGE-M3 已缓存在本地，indexer 有缓存时不再联网。
@@ -144,6 +168,10 @@ python -m app.agent.cli           # 人机对话；/new 换会话 /history 看�
 | `is_write_op(未知名) 返回 True` | 宁可多问一次确认，不可漏一次确认——保守方向要选对 |
 | 实时数据不走 RAG | 价格/库存是实时状态，只经 Function Calling；RAG 里的 spec 只是带时间戳的快照 |
 | 转人工必附对话摘要 | 人机切换不转述等于让用户重问一遍；摘要让坐席直接接手 |
+| **轨迹重置用"重新绑定"而非 `.clear()`** | 前端上一轮抓着的那份 trace 引用要还能指向完整的旧轨迹；`clear()` 会把它当场掏空，表现是"侧栏刚才还有，一刷新没了" |
+| **轨迹重置包在 `handle` 外层 `try/finally`** | 主干有 4 个返回点、工具支路内部还会再转人工，逐点写重置必然漏一个；耗时也只在 `finally` 里记才不漏异常路径 |
+| **埋点只记在 Agent 层，不在检索器里** | `search_with_product_focus` 内部会再调一次 `search`，记在检索器里同一个 query 会落两行、命中率凭空翻倍；而且"回复"只有 Agent 层才有 |
+| **"检索为空"那轮也要记** | 原先这条路径是提前 return 的，那轮不落日志——而**兜底触发率**恰恰是埋点里最有意思的数，漏掉它等于白埋 |
 
 ## 检索评测（50 条集，docs/01 §七）
 
@@ -179,21 +207,22 @@ BM25 漏 3 条，融合后只剩 2 条；再叠应用层锚点补到最后 2 条
       路由到 `review_knowledge`（此前该库建好但无人查，会拿商品详情作答）
 - [x] 工程收尾：README 与代码同步、`requirements.txt` 重写（补回漏掉的 `jieba`）、
       `.env.example` / `LICENSE`
-- [ ] Streamlit 演示前端（让项目"能点开看"，当前只有 CLI）
-- [ ] 检索埋点（docs/01 §五 已设计，未实现）
+- [x] 检索埋点（docs/01 §五 的设计落地）：每轮 RAG 落一行 `data/logs/retrieval.jsonl`，
+      含 query / 召回块 / 引用判定 / outcome；引用率按**代理指标**标注（见「已知局限」）
+- [x] Streamlit 演示前端：对话 + 侧栏把本轮内部状态摊开（意图、召回、工具、兜底），
+      并附无头端到端自测 `python -m app.agent.webui --e2e`
 - [x] ~~MySQL / Redis 接入~~ → 主动不做，理由见文末「明确不做」
 - [x] ~~多用户支持~~ → 注入点已收口（D6），接登录态时改一处即可
 
 ## 技术栈
 
 Python 3.10+ · ChromaDB · BGE-M3(FlagEmbedding) · rank-bm25 · jieba · DeepSeek API
-(OpenAI 兼容) · SQLite（演示数据）
-规划接入：Streamlit（演示前端）。MySQL / Redis 的方案已设计但**演示规模不接**，
-理由见文末「明确不做」。
+(OpenAI 兼容) · Streamlit（演示前端）· SQLite（演示数据）
+MySQL / Redis 的方案已设计但**演示规模不接**，理由见文末「明确不做」。
 
 > 状态机是**自研**的（`app/agent/graph.py` 手写分支 + 显式 Session 状态），没用 LangGraph。
 > 这是刻意的：先用裸手写把"为什么需要框架"验证一遍，再上 LangGraph 做对照。
-> `requirements.txt` 只列代码真正 import 的 5 个直接依赖，早期探索留下的
+> `requirements.txt` 只列代码真正 import 的 6 个直接依赖，早期探索留下的
 > langchain / langgraph 已移除（它们从未被引用）。
 
 ## 已知局限（如实写，防止面试官问穿）
@@ -204,6 +233,20 @@ Python 3.10+ · ChromaDB · BGE-M3(FlagEmbedding) · rank-bm25 · jieba · DeepS
 - BM25 索引建在进程内存，重启需重建（生产应外置，见 docs/04 Redis 设计）
 - 会话记忆是进程内存 dict，多实例部署会串——接口已按 Redis `chat:ctx` 设计，替换即可
 
+**已实现，但有保留（别当成准确率或生产级）**
+
+- **引用率是代理指标，不是准确率**：`app/retrieval/telemetry.py` 每轮记
+  query / 召回块 / outcome / 引用判定，但"这块资料用没用上"是用**字符 4-gram 重叠率**
+  猜的（扣掉本轮各块共有的样板文字，否则回复提一句商品名就会把该商品所有块判成被引用）。
+  两个已知盲区：**漏报同义改写**（"续航 30 小时"被改写成"能撑一天多"就认不出，实测
+  真答上来的三四块里只有 1 块过线），**看不见"该召回而没召回"**。所以
+  记录里带 `citation.method` 字段，每块原始重叠率也都留着，改阈值不必重跑 LLM。
+  它 **≠** 上面那个 hit@5——hit@5 靠 50 条**人工标注集**、回答的是"该召回的召回了没有"，
+  两者不许混着说
+- **前端的两条进程内假设**：`SessionStore` 无锁（两个标签页并发会互踩）、浏览器刷新会
+  遗弃一个 Session（无 TTL）。演示规模靠侧栏「结束会话」按钮手动回收，与
+  "会话记忆是进程内存"那条同源
+
 **明确不做（不是欠债，是判断）**
 
 - **MySQL / Redis 接入**：8 SKU 的演示量级下 SQLite + 进程内存没有可观察的差别，
@@ -212,9 +255,6 @@ Python 3.10+ · ChromaDB · BGE-M3(FlagEmbedding) · rank-bm25 · jieba · DeepS
 - **多用户会话**：`user_id` 目前硬编码 `"u1001"`，但**身份注入点已经收口**在
   `executor.execute`（决策 D6：丢弃模型自填的 user_id，一律以会话身份覆盖）。
   接登录态时只改这一处来源。当前单用户演示形态下不会串户
-- **检索埋点**：[docs/01](docs/01_rag_knowledge_base.md) §五 预留了"记录 query /
-  命中文档 / 最终是否被 LLM 引用"的埋点设计，未实现。当前的质量证据是**离线评测集**
-  （50 条 hit@5 = 100%），不是线上统计——这两者不是一回事，别混着说
 - **自动化测试**：只有各模块的 `__main__` 自测（有断言、可跑），未引入 pytest，
   因而没有 CI。自测覆盖的是"机制是否符合预期"，不是回归网
 
@@ -228,4 +268,5 @@ Python 3.10+ · ChromaDB · BGE-M3(FlagEmbedding) · rank-bm25 · jieba · DeepS
 | 只读缓存 key 未含 `user_id`，按用户维度的工具会串户 | D5：key 哈希 `{user_id, arguments}` | `61cfec0` |
 | 评价域建了库但没意图会路由过去 | 新增第 8 个意图 `review_consult` → `review_knowledge` | `876089c` |
 | `intent.classify` 无重试，抖一下每句话都变"请澄清" | 复用 `client.safe_call`，并把解析失败与出网失败分开报 | `7dce383` |
-| `requirements.txt` 是 UTF-16、漏 `jieba`、混入未引用依赖 | 转 UTF-8；重写为 5 个直接依赖并补回 `jieba` | `05230df` / 本次 |
+| `requirements.txt` 是 UTF-16、漏 `jieba`、混入未引用依赖 | 转 UTF-8；重写为直接依赖清单并补回 `jieba` | `05230df` / `e005907` |
+| 每轮内部决策无留痕，前端无从展示，docs/01 §五 的埋点承诺空着 | 本轮轨迹（`trace_view` 定契约）+ 检索埋点（`telemetry`）+ 侧栏可视化 | 本次 |
