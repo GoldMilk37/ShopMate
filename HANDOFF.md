@@ -13,8 +13,8 @@
 三层（RAG 检索 / 工具层 / Agent 状态机）**都已跑通**，50 条评测集 hit@5 达到 100%，
 `python -m app.agent.cli` 可以直接人机对话。
 
-**但 Git 历史整理做了一半就停了**：新改动的 4 个 commit 已按要求命名，**旧的 4 个
-`goo` 消息还没改**，且本地比远端领先 4 个 commit **尚未推送**。详见 §5。
+**Git 已收尾**（2026-09-13）：`main` = `origin/main` = `77f8492`，全部推送完毕；
+历史里 4 条 `goo` 占位消息**决定保留不改**。详见 §5。
 
 ---
 
@@ -129,25 +129,35 @@ app/
 
 ---
 
-## 5. Git 现状（接手必读）
+## 5. Git 现状（已收尾）
 
 ### 当前状态
 
 ```
-main      7cb8d5b [origin/main: ahead 4]   ← 领先远端 4 个 commit，尚未推送
-backup-before-cleanup  85ae90b             ← 整理前的安全备份，不要删
+main      77f8492 [origin/main]   ← 与远端一致，已全部推送
+backup-before-cleanup  85ae90b    ← 整理前的安全备份，不要删
 ```
 
-工作区干净。已提交的 4 个新 commit（消息已按要求写好）：
+工作区干净。2026-09-13 走的是**路线 A：不改写历史，直接 fast-forward 推**：
 
 ```
+85ae90b..77f8492  main -> main
+```
+
+已在远端的 5 个 commit：
+
+```
+77f8492 docs:  增加交接文档，记录项目现状与 Git 未完成事项
 7cb8d5b chore: 索引产物与本地工作目录移出版本库
 05230df fix:   requirements.txt 转 UTF-8，pip install -r 才可读
 396edbe docs:  重写 README 并回写评测结论
 7f6477d feat(agent): Agent 层话题商品锚点过滤，检索 hit@5 96%→100%
 ```
 
-历史最上面 4 个仍是占位消息（`first commit` / `框架起立` 是有含义的，保留）：
+### 关于 4 条 `goo` 消息：决定保留
+
+历史顶部还有 4 条占位消息，**决定不改写了**——仓库不对外展示，改名的收益抵不上
+rebase 在这台机器上的风险（见下）。它们实际对应的内容：
 
 ```
 85ae90b goooooooo   → 实际是：整个 Agent 层 + tools 层 + llm 层 + eval
@@ -158,7 +168,7 @@ c2df46b 框架起立
 0b5163c first commit
 ```
 
-拟改成的名字（写在这里，省得重新推导）：
+万一以后要改，映射表在这里（省得重新推导）：
 
 | 原 | 新 |
 |---|---|
@@ -167,43 +177,45 @@ c2df46b 框架起立
 | `goooooo` | `feat(retrieval): 实现向量+BM25 混合检索与 RRF 融合` |
 | `goooooooo` | `feat(agent): 实现工具层、Agent 状态机、LLM 客户端与检索评测` |
 
-### ⚠️ 为什么停在半路（重要，别重复踩）
+### ⚠️ 真要走改写历史，先读这段
 
-尝试用 `git rebase -i` 改写这 4 条消息，**失败了三次**，原因不是命令写错：
+当时试过 `git rebase -i`，**失败了三次**，原因不是命令写错：
 
-1. **第一次踩的坑**：新版 git 的 rebase todo 行格式是 `pick <sha> # <message>`
-   （sha 和消息之间有 `#`），老写法 `<verb> <sha> <message>` 匹配不上，
-   结果 todo 里一个 reword 都没改成，rebase 空跑一遍。
-2. **根因**：这台机器上 `git checkout` 切到旧 commit（如 `c2df46b`）时，
-   **`app/retrieval/__init__.py` 不会被写回磁盘**（该文件只有两行注释，
-   `core.autocrlf=true`）。已单独复现过一次，可 100% 重现。
-   于是 rebase 一开始检测到 unstaged deletion 就中止：
-   `error: cannot rebase: You have unstaged changes`。
-3. 每次中止都留下了 rebase 中间态，传染给下一次尝试。
+1. **todo 行格式变了**：新版 git 是 `pick <sha> # <message>`（sha 与消息之间有 `#`），
+   老写法 `<verb> <sha> <message>` 匹配不上 —— 结果一个 reword 都没改成，rebase 空跑一遍。
+2. **根因（可 100% 复现）**：这台机器 `core.autocrlf=true`，`git checkout` 切到旧 commit
+   （如 `c2df46b`）时 **`app/retrieval/__init__.py` 不会被写回磁盘**。rebase 一开始检测到
+   unstaged deletion 就中止：`error: cannot rebase: You have unstaged changes`。
+3. 每次中止都留下 rebase 中间态，传染给下一次尝试。恢复办法：
+   `git checkout -- app/retrieval/__init__.py`。
 
-已解决的部分：文件已用 `git checkout -- app/retrieval/__init__.py` 恢复，
-五个离线自测复跑全 PASS，工作区干净。
+**绕开办法：别用 rebase。** 用 `git reset --soft backup-before-cleanup` 再按逻辑单元重新提交——
+这条路完全不动工作区，不触发上面第 2 条。
 
-### 继续整理的三条路线（任选，按推荐度排序）
+### push 不上去时先看这里
 
-**A. 不改写历史，直接推（最省事）**
-```bash
-git push origin main          # fast-forward，不需要 force
+直连 github.com 会被 reset，报错长这样：
+
 ```
-代价：远端历史里那 4 个 `goo` 消息留着。仓库是自己用的话无实质影响。
-
-**B. 先 `autocrlf=false` 再 rebase（想改干净的话）**
-```bash
-git config core.autocrlf false
-git reset --hard backup-before-cleanup   # 或直接在干净工作区上
-# 再 rebase，todo 解析要用 `pick <sha> # <message>` 的格式
-git push --force-with-lease origin main
+fatal: unable to access 'https://github.com/...': schannel: failed to receive handshake, SSL/TLS connection failed
 ```
-改完记得确认 `app/retrieval/__init__.py` 还在。**操作前先做本地副本备份。**
 
-**C. 不管了，直接 force push 现状**：不建议，历史没整理干净还付了 force 的代价。
+**这个报错完全看不出是代理问题**——本机 `http.proxy` / `https.proxy` 都是空的，
+git 默认直连。要走 Clash：
 
-### 无论走哪条，验证清单
+```bash
+git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 push origin main
+```
+
+先确认 Clash 活着（返回 200 才往下走）：
+
+```bash
+curl -x http://127.0.0.1:7890 -o /dev/null -w "%{http_code}\n" https://github.com
+```
+
+（想一劳永逸：`git config http.proxy http://127.0.0.1:7890`，本仓库尚未配置。）
+
+### 验证清单
 
 ```bash
 ls app/retrieval/__init__.py                       # 必须在
@@ -215,8 +227,7 @@ git status --short                                 # 必须干净
 
 ## 6. 建议的下一步顺序
 
-1. **先决定 Git 走哪条路线**（§5），这一步不复杂但会卡住所有人
-2. **P1 评价域路由** —— 这是当前收益最高的功能缺口，做完整个链路才算闭环
-3. **P2 三个缺陷**（`_transfer` 写历史、graph LLM 兜底、缓存 key 含 user_id）——
+1. **P1 评价域路由** —— 这是当前收益最高的功能缺口，做完整个链路才算闭环
+2. **P2 三个缺陷**（`_transfer` 写历史、graph LLM 兜底、缓存 key 含 user_id）——
    加起来不到半小时，直接影响"能不能演示得住"
-4. MySQL / Redis 接入 → 多用户支持
+3. MySQL / Redis 接入 → 多用户支持
