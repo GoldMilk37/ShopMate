@@ -2,3 +2,11 @@
 venv/
 __pycache__/
 .env
+
+# 运行产物：data/chroma/ 由 `python -m app.retrieval.indexer` 重建，
+# data/logs/ 是工具调用日志。二者每次运行都会变化，不该进版本库。
+data/chroma/
+data/logs/
+
+# 本地工作记忆（项目级memory、会话记录）
+.workbuddy/
