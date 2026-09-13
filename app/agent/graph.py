@@ -13,7 +13,7 @@
     四条兜底：意图置信度<0.6 追问 / 检索空结果话术 / 工具连败2次转人工 /
     连续2次不满转人工
 
-七个设计决策（面试讲的就是这些）：
+九个设计决策（面试讲的就是这些）：
     D1 确认门在意图识别之前：pending_write 存在时，用户的下一句话只
        有两种合法含义（同意/拒绝），让 LLM 再去识别意图反而引入误判
        （"不换了"会被判成售后处理）。关键词判定 + 模糊话术回问，
@@ -43,6 +43,11 @@
        记住的上文锚点）后调用 retriever.search_with_product_focus，
        把该商品的资料重排到前面。刻意不用独占式过滤——见检索器 D8，
        那会把 product_id 为空的 faq/guide 整体排除，反而答错更多。
+    D9 LLM 出网失败一律降级、不裸抛：连接类抖动（超时/断连/限流）重试
+       一次，仍失败就返回 None 交给调用方，各支路给各自的兜底话术。
+       不统一文案是因为"资料里没有"和"服务没连上"对用户是两回事——
+       混成一句会让用户以为我们真的查不到这个商品的信息。认证/参数类
+       错误不重试：重试一万次也是同样结果，只会让用户白等。
 
 依赖链：handle ⊂ intent.classify + retrieval.search + tools.executor + llm.chat。
 入口：python -m app.agent.cli（人机对话）；python -m app.agent.graph（自测）。
@@ -79,6 +84,44 @@ RAG_PROMPT = PERSONA + """
 # 检索空结果的兜底话术（03 文档 §4 + 01 文档 §5 兜底的合并落地）
 NO_INFO_REPLY = ("这一点我暂时没有准确信息，为避免误导就不猜了。"
                  "您可以输入「转人工」，人工客服会马上帮您确认。")
+
+# D9：LLM 本身没答上来（网络/服务问题）的兜底。刻意与 NO_INFO_REPLY 分开——
+# 那句的意思是"资料里没有"，这句的意思是"我没连上"，对用户是两回事。
+LLM_FAIL_REPLY = ("抱歉，我这边刚才没能连上后台服务，这个问题没能答上。"
+                  "您可以再说一遍，或输入「转人工」由人工客服帮您处理。")
+
+# 哪些异常值得重试：只认连接类抖动。不 import openai 的异常类，一是本模块
+# 的离线自测至今不依赖 openai 装没装（client.py 是懒加载的），二是 httpx
+# 的异常同样会冒上来，按类名一并兜住。
+_RETRYABLE_HINTS = ("Timeout", "Connection", "RateLimit", "APIStatus",
+                    "InternalServer", "ServiceUnavailable")
+
+
+def _retryable(e: Exception) -> bool:
+    """按异常类名判断是否值得重试（见 D9 的取舍说明）。"""
+    name = type(e).__name__
+    return any(h in name for h in _RETRYABLE_HINTS)
+
+
+def _safe_llm(fn, *args, **kwargs):
+    """D9：LLM 调用的统一兜底。抖动重试一次，仍失败返回 None。
+
+    返回 None 而不是直接给话术，是因为三个调用点的降级文案不一样，
+    一刀切会让用户看到文不对题的回复（见 LLM_FAIL_REPLY 的说明）。
+    """
+    last: Exception | None = None
+    for attempt in range(2):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:                  # 兜底就是要兜住全部，包括 openai 的各类异常
+            last = e
+            if attempt == 0 and _retryable(e):
+                time.sleep(0.8)                 # 只等一次，别把用户晾在这儿
+                continue
+            break
+    print(f"[graph] LLM 调用失败，已降级: {type(last).__name__}: {last}")
+    return None
+
 
 # D1：确认门的关键词（判定顺序：先否后肯，"不要"必须落在否定上）
 YES_WORDS = ("确认", "确定", "是的", "好的", "好", "嗯", "可以", "要", "对", "继续", "办", "申请")
@@ -136,7 +179,7 @@ class Agent:
             s.dissatisfaction += 1
             if s.dissatisfaction >= MAX_DISCONTENT:
                 s.dissatisfaction = 0
-                return self._transfer(s, "user_dissatisfied",
+                return self._transfer(s, "user_dissatisfied", text,
                                       "用户连续表达不满，主动转人工")
         else:
             s.dissatisfaction = 0                        # "连续"不成立就清零
@@ -188,7 +231,11 @@ class Agent:
             *s.history,
             {"role": "user", "content": f"【资料】\n{docs}\n\n【用户问题】{text}"},
         ]
-        reply = llm.chat_text(messages) or NO_INFO_REPLY
+        raw = _safe_llm(llm.chat_text, messages)         # D9
+        if raw is None:
+            reply = LLM_FAIL_REPLY          # 压根没答上：不是"资料没有"，别说错话
+        else:
+            reply = raw or NO_INFO_REPLY    # 答了但是空的：按"资料没覆盖"处理
         s.append_round(text, reply)
         return reply
 
@@ -198,7 +245,7 @@ class Agent:
         messages = [
             {"role": "system", "content": PERSONA + """
 你可以调用业务工具查询实时数据（订单/物流/价格/库存）。规则：
-- 用户没给订单号就先用 user_id="u1001" 查（测试环境单用户）
+- 用户没给订单号就直接查：不要自己填 user_id，系统会自动带上当前用户身份
 - 一次回答最多调 2 个工具；查询结果原样转述，不要编造
 - 退换货/维修是写操作：收集齐订单号/商品/原因后立刻调用工具，系统会
   自动向用户出示确认提示。你自己绝不在回复文本里征求确认（那会让
@@ -207,7 +254,10 @@ class Agent:
             {"role": "user", "content": text},
         ]
         for _ in range(MAX_TOOL_ROUNDS):                 # D6
-            msg = llm.chat(messages, tools=get_schemas())
+            msg = _safe_llm(llm.chat, messages, tools=get_schemas())   # D9
+            if msg is None:                              # 编排断了≠工具失败，不记连败
+                s.append_round(text, LLM_FAIL_REPLY)
+                return LLM_FAIL_REPLY
             if not msg.tool_calls:                       # 不再调工具 → 终答
                 reply = msg.content or NO_INFO_REPLY
                 s.append_round(text, reply)
@@ -230,7 +280,7 @@ class Agent:
                     s.tool_fail_streak += 1
                     if s.tool_fail_streak >= MAX_TOOL_FAILS:
                         s.tool_fail_streak = 0
-                        return self._transfer(s, "out_of_scope",
+                        return self._transfer(s, "out_of_scope", text,
                                               f"工具连续失败，最后错误：{result.message}")
                 else:
                     s.tool_fail_streak = 0
@@ -268,9 +318,21 @@ class Agent:
 
     # ---------------- 兜底汇聚点（D3/D7） ----------------
 
-    def _transfer(self, s: Session, reason: str, summary: str) -> str:
-        recent = " / ".join(m["content"][:50] for m in s.history[-6:]
-                            if m["role"] == "user") or summary
+    def _transfer(self, s: Session, reason: str, user_text: str,
+                  summary: str = "") -> str:
+        """D7：三种触发源（点名/连败/不满）共用的落地动作。
+
+        user_text 是本轮用户原话，summary 是系统发起时才有的原因说明。
+        两个都要：user_text 用来写会话历史 + 拼摘要，summary 让坐席一眼
+        看懂"为什么转"（连败次数、错误信息这类用户话里没有的上下文）。
+        """
+        # 摘要必须含本轮：本轮要等回复生成后才成对入 history，先算就等于
+        # 把用户最后一句丢掉——而那句往往正是转人工的原因。
+        pending = [*s.history, {"role": "user", "content": user_text}]
+        recent = " / ".join(m["content"][:50] for m in pending[-6:]
+                            if m["role"] == "user")
+        if summary:                                     # 系统发起：原因一并带上
+            recent = f"{recent}；{summary}" if recent else summary
         r = tool_execute("transfer_to_human",
                          {"reason": reason, "summary": recent, "urgency": "normal"},
                          user_id="u1001", confirmed=True)    # D3：系统发起自动确认
@@ -280,6 +342,9 @@ class Agent:
                      f"{r.data.get('estimated_wait', '')}）。已把您的问题摘要发给坐席，不用重复描述。")
         else:
             reply = f"转人工没有成功：{r.message} 您也可以稍后再试。"
+        # 转人工这一轮也必须进会话历史：之前漏了，/history 里看不到，
+        # 下一轮拼上下文时用户最后一句凭空消失（P2-1）。
+        s.append_round(user_text, reply)
         return reply
 
     # ---------------- 闲聊支路 ----------------
@@ -287,7 +352,7 @@ class Agent:
     def _free_chat(self, s: Session, text: str) -> str:
         messages = [{"role": "system", "content": PERSONA},
                     *s.history, {"role": "user", "content": text}]
-        reply = llm.chat_text(messages, temperature=0.7)
+        reply = _safe_llm(llm.chat_text, messages, temperature=0.7) or LLM_FAIL_REPLY
         s.append_round(text, reply)
         return reply
 
@@ -328,9 +393,50 @@ if __name__ == "__main__":
     print("确认门-模糊:", r)
 
     # 系统转人工落地（D3/D7，只碰 mock 不碰 LLM）
-    r = a._transfer(s, "user_request", "测试摘要")
+    r = a._transfer(s, "user_request", "我要转人工", "测试摘要")
     assert "转接人工" in r
-    print("转人工落地:", r)
+    assert s.history[-2:] == [{"role": "user", "content": "我要转人工"},
+                              {"role": "assistant", "content": r}], \
+        f"转人工这轮必须成对写进会话历史（P2-1），实际 {s.history[-2:]}"
+    print("转人工落地 + 写历史:", r)
+
+    # ---- LLM 故障降级（D9，不联网：用会抛异常的桩替掉真实调用） ----
+    class _FakeConnTimeout(Exception):
+        pass
+
+    class _FakeAuthError(Exception):
+        pass
+
+    conn_calls: list[int] = []
+
+    def _conn_fail(*a, **k):
+        conn_calls.append(1)
+        raise _FakeConnTimeout("连接超时")
+
+    assert _safe_llm(_conn_fail) is None
+    assert len(conn_calls) == 2, f"连接类异常应重试一次（共 2 次），实际 {len(conn_calls)}"
+
+    auth_calls: list[int] = []
+
+    def _auth_fail(*a, **k):
+        auth_calls.append(1)
+        raise _FakeAuthError("key 无效")
+
+    assert _safe_llm(_auth_fail) is None
+    assert len(auth_calls) == 1, f"认证类错误不该重试，实际调用 {len(auth_calls)} 次"
+    print(f"LLM 降级: 抖动重试 {len(conn_calls)} 次 / 认证错误只试 1 次，均返回 None")
+
+    # 端到端：整条闲聊支路在 LLM 挂掉时给降级话术，而不是把异常抛给用户
+    orig_chat_text = llm.chat_text
+    llm.chat_text = _conn_fail                            # 桩（_free_chat 在调用时才取属性）
+    try:
+        s2 = local_store.get("t2")
+        r2 = a._free_chat(s2, "你好呀")
+    finally:
+        llm.chat_text = orig_chat_text
+    assert r2 == LLM_FAIL_REPLY, r2
+    assert s2.history[-1]["content"] == LLM_FAIL_REPLY, "降级回复也要写进历史"
+    print("LLM 挂掉时的闲聊支路:", r2[:18] + "…")
 
     # ---- 有 key 才跑的部分：三条主流路全通 ----
     if os.environ.get("DEEPSEEK_API_KEY"):

@@ -8,5 +8,3 @@ __pycache__/
 data/chroma/
 data/logs/
 
-# 本地工作记忆（项目级memory、会话记录）
-.workbuddy/

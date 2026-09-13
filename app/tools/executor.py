@@ -4,7 +4,7 @@
     execute(name, arguments, user_id, confirmed)   Agent 状态机只调这个
     ToolResult                                      每次调用的统一结果
 
-五个设计决策（02 文档四条调用原则怎么变成代码）：
+六个设计决策（02 文档四条调用原则怎么变成代码）：
     D1 写操作确认门：is_write_op 且未 confirmed → 不执行，返回
        status="needs_confirmation" + 给用户看的提案文案。状态机拿它去问
        用户，用户点头后带 confirmed=True 重调（「提案→确认→执行」）。
@@ -21,7 +21,15 @@
     D5 只读工具 5min 结果缓存（04 文档 tool:cache:{tool}:{hash}）：
        Redis 还没接，先用进程内 dict + 过期时间戳顶上，key 结构照
        文档设计，接 Redis 时只换 _cache_get/_cache_set 两个函数。
-       写操作永不缓存——副作用重放是事故。
+       写操作永不缓存——副作用重放是事故。哈希串里必须含 user_id：
+       按用户维度的只读工具（"我的订单列表"）参数可能就是空表，只哈希
+       arguments 会让两个用户命中同一条缓存，把别人的订单发出去。
+    D6 身份以会话为准，模型说的不算：execute 收到的 user_id 覆盖掉
+       arguments 里模型自己填的任何 user_id。不这么做就有两个问题——
+       一是越权（用户说"查一下 u2002 的订单"，模型照填就能读到别人的
+       数据），二是缓存 key 里的 user_id 变成死分量（handler 拿到的
+       仍是模型给的，隔离了个寂寞）。这也是 P3 接多用户时唯一的
+       身份注入点：把这里的来源从硬编码换成登录态即可。
 
 用法：from app.tools.executor import execute
 命令行：python -m app.tools.executor（跑内置自测）
@@ -71,9 +79,15 @@ _cache: dict[str, tuple[float, ToolResult]] = {}
 _cache_lock = threading.Lock()
 
 
-def _cache_key(tool: str, arguments: dict) -> str:
-    """04 文档的 tool:cache:{tool}:{hash}：参数转稳定 JSON 再哈希。"""
-    canon = json.dumps(arguments, sort_keys=True, ensure_ascii=False)
+def _cache_key(tool: str, arguments: dict, user_id: str) -> str:
+    """04 文档的 tool:cache:{tool}:{hash}：用户 + 参数转稳定 JSON 再哈希。
+
+    user_id 进哈希而不是另起一段（key 形状保持文档里的三段式）。少了它，
+    "我的订单列表"这类参数为空的用户维度工具会串户——u1001 查过之后，
+    u2002 用同样的空参数直接命中 u1001 的缓存。
+    """
+    canon = json.dumps({"user_id": user_id, "arguments": arguments},
+                       sort_keys=True, ensure_ascii=False)
     return f"tool:cache:{tool}:{hashlib.md5(canon.encode('utf-8')).hexdigest()}"
 
 
@@ -106,6 +120,14 @@ def execute(name: str, arguments: dict | None = None, *,
     arguments = dict(arguments or {})
     t0 = time.perf_counter()
 
+    # ---- D6：身份以会话为准 ----
+    # 先无条件剥掉模型填的 user_id（哪怕这次没登录态，也不能让模型替用户
+    # 挑身份），再由本函数注入会话身份。handler 因此总能拿到可信的 user_id，
+    # 缓存 key 里那个分量也才是活的。
+    arguments.pop("user_id", None)
+    if user_id:
+        arguments["user_id"] = user_id
+
     # ---- 前置检查（不进线程池，快得很） ----
     if name not in load_definitions() or name not in HANDLERS:
         r = ToolResult("error", message=f"{ERROR_PREFIX}未知工具 {name}")
@@ -118,7 +140,7 @@ def execute(name: str, arguments: dict | None = None, *,
         return r
 
     # ---- 只读走缓存（D5） ----
-    key = _cache_key(name, arguments)
+    key = _cache_key(name, arguments, user_id)
     if not is_write_op(name):
         cached = _cache_get(key)
         if cached is not None:
@@ -228,4 +250,22 @@ if __name__ == "__main__":
     last = json.loads(lines[-1])
     assert {"ts", "user_id", "tool", "arguments", "result", "elapsed_ms"} <= set(last)
     print(f"7 日志: 共 {len(lines)} 条，末条字段完整（tool={last['tool']}）")
+
+    # 8. 缓存按用户隔离（D5）：同参数不同用户不得命中同一条缓存。
+    #    query_price 的优惠券只发给 u1001，正好能验出"有没有拿到别人的结果"。
+    clear_cache()
+    ra = execute("query_price", {"product_id": "SKU-10001"}, user_id="u1001")
+    rb = execute("query_price", {"product_id": "SKU-10001"}, user_id="u2002")
+    assert ra.ok and rb.ok
+    assert ra.data["coupons"] and not rb.data["coupons"], (ra.data, rb.data)
+    print("8 缓存按用户隔离: u1001 有券 / u2002 无券")
+
+    # 9. 越权防护（D6）：模型在参数里塞的 user_id 必须无效。
+    #    必须用"没有会话身份"来测——有身份时注入那一步会覆盖掉模型的值，
+    #    测出来是绿的但 pop 那行有没有起作用根本看不出来（假通过）。
+    clear_cache()
+    r9 = execute("query_price", {"product_id": "SKU-10001", "user_id": "u1001"})
+    assert not r9.data["coupons"], "无会话身份时模型塞的 user_id 生效了，越权没堵住"
+    print("9 越权防护: 无会话身份时，模型塞的 user_id 被丢弃")
+
     print("\n自测全部通过")
