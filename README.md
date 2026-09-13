@@ -11,7 +11,8 @@
 | RAG 检索（混合 + 话题商品锚点） | 已完成 | `python -m app.retrieval.eval` |
 | 工具层（6 工具，读写分级 + 确认门） | 已完成 | `python -m app.tools.executor` |
 | Agent 层（8 类意图 + 状态机 + 会话记忆） | 已完成 | `python -m app.agent.intent` / `.graph` |
-| MySQL / Redis 接入 | 未开始（现为 SQLite + 进程内存） | — |
+| 演示前端（Streamlit） | 计划中 | — |
+| MySQL / Redis 接入 | 主动不做（见文末「明确不做」） | — |
 
 ## 架构
 
@@ -24,7 +25,7 @@
 └────────┬─────────┘
          │ 否
          ▼
-┌──────────────────┐   ② 意图识别（LLM，7 类 + 置信度 + 槽位）
+┌──────────────────┐   ② 意图识别（LLM，8 类 + 置信度 + 槽位）
 │  intent.classify │   置信度 < 0.6 → 追问澄清
 └────────┬─────────┘   点名转人工 / 连败×2 / 不满×2 → 转人工（附摘要）
          │
@@ -63,7 +64,7 @@ ShopMate/
 │   │   ├── mock.py         #   模拟业务实现（SQLite + JSON 数据）
 │   │   └── executor.py     #   执行编排：确认门 / 超时 / 缓存 / 异常收敛
 │   ├── agent/              # Agent 状态机
-│   │   ├── intent.py       #   意图识别：7 类 + 置信度 + product_id 槽位
+│   │   ├── intent.py       #   意图识别：8 类 + 置信度 + product_id 槽位
 │   │   ├── graph.py        #   状态机主体：确认门 / 四条兜底 / 工具编排
 │   │   ├── session.py      #   会话记忆（进程内存版，接口按 Redis 设计）
 │   │   └── cli.py          #   命令行交互入口
@@ -85,7 +86,9 @@ ShopMate/
 │   ├── 02_tool_definitions.md     # 工具总览与调用原则（只读/写操作分级）
 │   ├── 03_agent_workflow.md       # 状态机：意图路由/置信度兜底/上下文管理
 │   └── 04_data_schema.md          # 元数据/Collection/MySQL/Redis 规范
-├── requirements.txt
+├── requirements.txt        # 只列直接依赖（5 个），不是 pip freeze 转储
+├── .env.example            # key / 代理的填写模板，复制成 .env 用
+├── LICENSE
 └── README.md
 ```
 
@@ -99,13 +102,15 @@ python -m venv .venv
 pip install -r requirements.txt
 
 # 2. 填 LLM key（DeepSeek，OpenAI 兼容协议）
-echo DEEPSEEK_API_KEY=sk-xxxxx > .env
+cp .env.example .env             # Windows cmd 用 copy .env.example .env
+# 然后编辑 .env，把 DEEPSEEK_API_KEY 换成你申请到的真 key
+# 连不上 api.deepseek.com 的话，.env.example 里也写了代理怎么配
 
 # 3. 离线自测（不联网、不依赖 key）
 python -m app.retrieval.loader    # 应打印：共加载 32 个文档 + SKU-10001 当前价 599
 python -m app.retrieval.chunker   # 应打印：124 个 chunk + 三项断言全通过
 python -m app.tools.registry      # 应打印：6 个工具 + 读写分级
-python -m app.tools.executor      # 应打印：7 项断言全通过
+python -m app.tools.executor      # 应打印：9 项断言全通过（含缓存按用户隔离、越权防护）
 python -m app.agent.session       # 应打印：10 轮成对截断
 
 # 4. 建库（首次会从 HuggingFace 拉 BGE-M3，之后离线可用）
@@ -116,7 +121,7 @@ python -m app.retrieval.retriever "通勤降噪耳机推荐"
 python -m app.retrieval.eval
 
 # 6. 跑 Agent（需 key）
-python -m app.agent.intent        # 意图识别 7 条用例
+python -m app.agent.intent        # 意图分类 9 条用例 + 解析降级 5 条断言（后者不需 key）
 python -m app.agent.graph         # 状态机冒烟（含确认门、工具编排、转人工）
 python -m app.agent.cli           # 人机对话；/new 换会话 /history 看记忆 /exit 退出
 ```
@@ -172,18 +177,24 @@ BM25 漏 3 条，融合后只剩 2 条；再叠应用层锚点补到最后 2 条
 - [x] Agent 层话题商品锚点（product_id 槽位过滤）
 - [x] 评价域路由：新增第 8 个意图 `review_consult`，把"口碑/评价/优缺点"
       路由到 `review_knowledge`（此前该库建好但无人查，会拿商品详情作答）
-- [ ] MySQL / Redis 接入（现为 SQLite + 进程内存会话）
-- [ ] 多用户支持（工具层当前硬编码 `user_id="u1001"`）
-- [ ] FastAPI 服务 + Streamlit 演示前端
+- [x] 工程收尾：README 与代码同步、`requirements.txt` 重写（补回漏掉的 `jieba`）、
+      `.env.example` / `LICENSE`
+- [ ] Streamlit 演示前端（让项目"能点开看"，当前只有 CLI）
+- [ ] 检索埋点（docs/01 §五 已设计，未实现）
+- [x] ~~MySQL / Redis 接入~~ → 主动不做，理由见文末「明确不做」
+- [x] ~~多用户支持~~ → 注入点已收口（D6），接登录态时改一处即可
 
 ## 技术栈
 
-Python 3.10+ · ChromaDB · BGE-M3(FlagEmbedding) · rank_bm25 · jieba · DeepSeek API
-(OpenAI 兼容) · python-dotenv · SQLite（演示数据）
-规划接入：MySQL · Redis
+Python 3.10+ · ChromaDB · BGE-M3(FlagEmbedding) · rank-bm25 · jieba · DeepSeek API
+(OpenAI 兼容) · SQLite（演示数据）
+规划接入：Streamlit（演示前端）。MySQL / Redis 的方案已设计但**演示规模不接**，
+理由见文末「明确不做」。
 
 > 状态机是**自研**的（`app/agent/graph.py` 手写分支 + 显式 Session 状态），没用 LangGraph。
-> `requirements.txt` 里 langchain / langgraph 等是早期探索时留下的，当前代码并未引用，待裁剪。
+> 这是刻意的：先用裸手写把"为什么需要框架"验证一遍，再上 LangGraph 做对照。
+> `requirements.txt` 只列代码真正 import 的 5 个直接依赖，早期探索留下的
+> langchain / langgraph 已移除（它们从未被引用）。
 
 ## 已知局限（如实写，防止面试官问穿）
 
@@ -193,15 +204,28 @@ Python 3.10+ · ChromaDB · BGE-M3(FlagEmbedding) · rank_bm25 · jieba · DeepS
 - BM25 索引建在进程内存，重启需重建（生产应外置，见 docs/04 Redis 设计）
 - 会话记忆是进程内存 dict，多实例部署会串——接口已按 Redis `chat:ctx` 设计，替换即可
 
-**尚未完成**
+**明确不做（不是欠债，是判断）**
 
-- 三个 RAG 类意图都检索 `product_knowledge`，评价域（`review_knowledge`）未接进路由
-- 工具层硬编码 `user_id="u1001"`，多用户隔离未做
-- 业务数据是 SQLite + JSON 模拟，未接真实 MySQL
+- **MySQL / Redis 接入**：8 SKU 的演示量级下 SQLite + 进程内存没有可观察的差别，
+  换上去收益是零。规范已写在 [docs/04_data_schema.md](docs/04_data_schema.md)，
+  接了真实业务量再按图替换
+- **多用户会话**：`user_id` 目前硬编码 `"u1001"`，但**身份注入点已经收口**在
+  `executor.execute`（决策 D6：丢弃模型自填的 user_id，一律以会话身份覆盖）。
+  接登录态时只改这一处来源。当前单用户演示形态下不会串户
+- **检索埋点**：[docs/01](docs/01_rag_knowledge_base.md) §五 预留了"记录 query /
+  命中文档 / 最终是否被 LLM 引用"的埋点设计，未实现。当前的质量证据是**离线评测集**
+  （50 条 hit@5 = 100%），不是线上统计——这两者不是一回事，别混着说
+- **自动化测试**：只有各模块的 `__main__` 自测（有断言、可跑），未引入 pytest，
+  因而没有 CI。自测覆盖的是"机制是否符合预期"，不是回归网
 
-**已知待修缺陷**
+**上一轮已知缺陷（已全部修复，留档备查）**
 
-- `graph._transfer()` 未写会话历史：转人工这一轮在 `/history` 里看不到，会话摘要也会缺用户输入
-- `graph.py` 里若干处 LLM 调用没有 try/except，网络抖动会中断会话（`intent.classify` 有兜底，其它没有）
-- `executor` 只读缓存的 key 只哈希了 `arguments`，未含 `user_id`；将来加"我的订单列表"这类按用户维度的只读工具会串户（也是多用户支持的前置）
-- `requirements.txt` 是 UTF-16 编码且含未使用的依赖，`pip install -r` 前需留意
+| 缺陷 | 修法 | commit |
+|---|---|---|
+| `graph._transfer()` 未写会话历史 | 转人工这一轮补进 sessions，摘要带上系统发起的 reason | `61cfec0` |
+| 若干处 LLM 调用没兜底，网络抖动中断会话 | D9 降级 + 重试判据收口到 `client.safe_call` | `61cfec0` / `7dce383` |
+| 模型自填的 `user_id` 即权威身份（可越权查他人订单） | D6：丢弃模型填的，以会话身份覆盖 | `61cfec0` |
+| 只读缓存 key 未含 `user_id`，按用户维度的工具会串户 | D5：key 哈希 `{user_id, arguments}` | `61cfec0` |
+| 评价域建了库但没意图会路由过去 | 新增第 8 个意图 `review_consult` → `review_knowledge` | `876089c` |
+| `intent.classify` 无重试，抖一下每句话都变"请澄清" | 复用 `client.safe_call`，并把解析失败与出网失败分开报 | `7dce383` |
+| `requirements.txt` 是 UTF-16、漏 `jieba`、混入未引用依赖 | 转 UTF-8；重写为 5 个直接依赖并补回 `jieba` | `05230df` / 本次 |
