@@ -52,8 +52,10 @@ if str(ROOT) not in sys.path:
 import streamlit as st                                        # noqa: E402
 
 from app.agent import trace_view                              # noqa: E402
-from app.agent.graph import agent                             # noqa: E402
+from app.agent.runtime import get_agent                       # noqa: E402
 from app.agent.session import store                           # noqa: E402
+
+agent = get_agent()   # SHOPMATE_AGENT=lg 切 LangGraph 版；默认手写版，行为不变
 
 SPINNER = "小搭正在思考……（首次检索要加载向量模型，约十几秒）"
 

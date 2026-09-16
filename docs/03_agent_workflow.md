@@ -46,3 +46,23 @@
 - 短期记忆：Redis 存储最近 10 轮对话
 - 长期记忆：MySQL 存储用户画像、历史订单、偏好标签
 - 跨轮意图追踪：记录当前对话主题，避免话题漂移
+
+## 六、LangGraph 编排版（2026-09 新增，与手写版并存）
+
+`app/agent/lg_graph.py` 用 LangGraph StateGraph 重写了本文档的状态机，
+两种实现同任务并存，`SHOPMATE_AGENT=lg` 切换（默认手写版）。对照表：
+
+| 本文概念 | 手写版（graph.py） | LangGraph 版（lg_graph.py） |
+|---|---|---|
+| 确认门（§二 tool_calling 的跨轮确认） | pending_write 存 Session + 意图识别前关键词判定 | `interrupt()` 挂起 + `Command(resume=)`，暂停态由 checkpointer 承载 |
+| 置信度兜底 / 不满兜底（§四） | handle 内 if 分支 | classify 节点后的 conditional_edges |
+| 工具编排循环 | for 循环 ≤3 轮 | tool_llm ⇄ tool_exec 环 + 计数器 |
+| 会话记忆（§五，Redis chat:ctx） | 进程内存 SessionStore | SqliteSaver checkpoint 落盘（进程重启后确认门仍可续） |
+| 本轮轨迹 | Session.trace + try/finally 重置 | state["trace"]，ingest 节点每轮重建 |
+
+关键差异：手写版确认门挂在进程内存里，重启即丢；LangGraph 版的暂停点
+持久化在 `data/graph_checkpoints.sqlite3`，换进程 resume 照样成立——
+这是框架原语替代手写逻辑后**多出来的能力**。轨迹契约（TRACE_KEYS）、
+提示词、工具执行（executor）、检索（retriever）、LLM 出口（client）两版
+完全共用，行为除持久化外等价（各有离线自测钉住：`python -m app.agent.graph`
+/ `python -m app.agent.lg_graph`）。

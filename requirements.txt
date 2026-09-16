@@ -17,6 +17,14 @@ jieba==0.42.1            # 中文分词，BM25 建索引和查询两侧都用
 # --- LLM 层 ---
 openai==3.13.0           # DeepSeek 走 OpenAI 兼容协议（client.py 懒加载）
 
+# --- LangGraph / LangChain（2026-09 换回，与手写版并存，见 README 技术栈） ---
+# 当年因"从未被引用"移除；现在 lg_graph.py / lc_retriever.py 真正引用它们，
+# 手写版 graph.py / retriever.py 保留，两种实现可用环境变量切换对比。
+langgraph==1.2.11                    # Agent 编排（StateGraph/interrupt/SqliteSaver）
+langgraph-checkpoint-sqlite==3.1.1   # checkpoint 持久化（确认门断点续跑）
+langchain-core==1.6.3                # Embeddings 接口协议（BGEEmbeddings 实现）
+langchain-chroma==1.1.0              # Chroma 向量库集成（LangChain 版检索器）
+
 # --- 演示前端 ---
 streamlit==1.63.0        # app/agent/webui.py；测试用的 AppTest 也在这个包里
 

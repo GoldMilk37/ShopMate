@@ -14,6 +14,8 @@
 | 检索埋点（每轮检索落 JSONL） | 已完成 | `python -m app.retrieval.telemetry` |
 | 工具层（6 工具，读写分级 + 确认门） | 已完成 | `python -m app.tools.executor` |
 | Agent 层（8 类意图 + 状态机 + 会话记忆） | 已完成 | `python -m app.agent.intent` / `.graph` |
+| LangGraph 编排版状态机（interrupt + checkpoint） | 已完成 | `python -m app.agent.lg_graph` |
+| LangChain 版检索器（与手写版逐项对齐） | 已完成 | `python -m app.retrieval.lc_retriever` |
 | 本轮轨迹契约与渲染 | 已完成 | `python -m app.agent.trace_view` |
 | 演示前端（Streamlit） | 已完成 | `python -m app.agent.webui --e2e` |
 | MySQL / Redis 接入 | 主动不做（见文末「明确不做」） | — |
@@ -66,16 +68,19 @@ ShopMate/
 │   │   ├── loader.py       #   加载 rag_docs 产出 RawDoc（结构化 + 非结构化）
 │   │   ├── chunker.py      #   按文档类型分块（六种切法）→ 124 chunk
 │   │   ├── indexer.py      #   BGE-M3 向量化 + ChromaDB 持久化入库
-│   │   ├── retriever.py    #   向量+BM25 混合检索、RRF 融合、元数据过滤
+│   │   ├── retriever.py    #   向量+BM25 混合检索、RRF 融合、元数据过滤（手写版）
+│   │   ├── lc_retriever.py #   LangChain 版检索器：只换向量路，融合段与手写版共用
 │   │   ├── telemetry.py    #   检索埋点：每轮落一行 JSONL + 引用代理指标
-│   │   └── eval.py         #   50 条评测集，四路 hit@5 对照
+│   │   └── eval.py         #   50 条评测集，四路 hit@5 对照（支持双实现切换）
 │   ├── tools/              # Function Calling 工具层
 │   │   ├── registry.py     #   加载 JSON 工具定义，读写分级（WRITE_OPS）
 │   │   ├── mock.py         #   模拟业务实现（SQLite + JSON 数据）
 │   │   └── executor.py     #   执行编排：确认门 / 超时 / 缓存 / 异常收敛
-│   ├── agent/              # Agent 状态机
+│   ├── agent/              # Agent 状态机（手写与 LangGraph 两版并存）
 │   │   ├── intent.py       #   意图识别：8 类 + 置信度 + product_id 槽位
-│   │   ├── graph.py        #   状态机主体：确认门 / 四条兜底 / 工具编排 / 本轮轨迹
+│   │   ├── graph.py        #   状态机主体（手写版）：确认门 / 四条兜底 / 工具编排
+│   │   ├── lg_graph.py     #   状态机（LangGraph 版）：interrupt 确认门 + checkpoint
+│   │   ├── runtime.py      #   实现选择器：SHOPMATE_AGENT=lg 切 LangGraph 版
 │   │   ├── session.py      #   会话记忆（进程内存版，接口按 Redis 设计）
 │   │   ├── trace_view.py   #   本轮轨迹的键名契约 + 渲染（CLI 与前端共用）
 │   │   ├── webui.py        #   Streamlit 演示前端：对话 + 侧栏摊开内部状态
@@ -92,6 +97,7 @@ ShopMate/
 │   │   └── guides/         #   选购指南 ×3
 │   ├── tools/              # 工具定义 JSON ×6
 │   ├── chroma/             # ChromaDB 持久化目录（3 collection）
+│   ├── graph_checkpoints.sqlite3  # LangGraph checkpoint（lg 版确认门断点续跑）
 │   └── logs/               # 运行日志（jsonl）：工具调用 + 每轮检索埋点
 ├── docs/                   # 设计文档（决策依据都在这里）
 │   ├── 01_rag_knowledge_base.md   # 知识库：分域/分块/混合检索/评测结论
@@ -99,7 +105,7 @@ ShopMate/
 │   ├── 03_agent_workflow.md       # 状态机：意图路由/置信度兜底/上下文管理
 │   ├── 04_data_schema.md          # 元数据/Collection/MySQL/Redis 规范
 │   └── 05_demo_runbook.md         # 演示手册：怎么跑、问什么、看哪里
-├── requirements.txt        # 只列直接依赖（6 个），不是 pip freeze 转储
+├── requirements.txt        # 只列直接依赖（6 + 4 个），不是 pip freeze 转储
 ├── .env.example            # key / 代理的填写模板，复制成 .env 用
 ├── LICENSE
 └── README.md
@@ -127,6 +133,8 @@ python -m app.tools.registry      # 应打印：6 个工具 + 读写分级
 python -m app.tools.executor      # 应打印：9 项断言全通过（含缓存按用户隔离、越权防护）
 python -m app.agent.session       # 应打印：10 轮成对截断
 python -m app.agent.trace_view    # 轨迹渲染：标签覆盖 + 半成品轨迹不抛
+python -m app.agent.lg_graph      # LangGraph 版状态机：确认门三路 + 断点续跑（桩测，不联网）
+python -m app.retrieval.lc_retriever  # LangChain 版检索器：双版对照逐项一致（需已建库，不联网）
 python -m app.agent.webui --e2e   # 前端无头端到端（AppTest，同样不联网）
 
 # 4. 建库（首次会从 HuggingFace 拉 BGE-M3，之后离线可用）
@@ -140,9 +148,11 @@ python -m app.retrieval.eval
 python -m app.agent.intent        # 意图分类 9 条用例 + 解析降级 5 条断言（后者不需 key）
 python -m app.agent.graph         # 状态机冒烟（含确认门、工具编排、转人工）
 python -m app.agent.cli           # 人机对话；/new 换会话 /history 看记忆 /trace 看本轮状态
+SHOPMATE_AGENT=lg python -m app.agent.cli   # 同样的事，换 LangGraph 编排版跑（interrupt 确认门 + 断点续跑）
 
 # 7. 浏览器演示（需 key；首次检索要加载 BGE-M3，十几秒）
 streamlit run app/agent/webui.py  # 侧栏能点开看本轮内部状态；有「预热模型」按钮
+                                  # 同样支持 SHOPMATE_AGENT=lg 切 LangGraph 版
 ```
 
 > 前端怎么验：`python -m app.agent.webui --e2e` 是**真正的**端到端——它用
@@ -178,6 +188,10 @@ streamlit run app/agent/webui.py  # 侧栏能点开看本轮内部状态；有�
 | **"检索为空"那轮也要记** | 原先这条路径是提前 return 的，那轮不落日志——而**兜底触发率**恰恰是埋点里最有意思的数，漏掉它等于白埋 |
 
 ## 检索评测（50 条集，docs/01 §七）
+
+换检索实现时评测就是回归网：`SHOPMATE_RETRIEVER=lc python -m app.retrieval.eval` 跑
+LangChain 版（langchain_chroma 向量路 + 共用融合段），与手写版结果应逐项一致
+（当前两版均为 90 / 94 / 96 / 100，未命中清单相同）。
 
 评测集是 50 条真实客服话术改写，人工标注应命中的 chunk，`hit@5` 四路对照：
 
@@ -215,18 +229,31 @@ BM25 漏 3 条，融合后只剩 2 条；再叠应用层锚点补到最后 2 条
       含 query / 召回块 / 引用判定 / outcome；引用率按**代理指标**标注（见「已知局限」）
 - [x] Streamlit 演示前端：对话 + 侧栏把本轮内部状态摊开（意图、召回、工具、兜底），
       并附无头端到端自测 `python -m app.agent.webui --e2e`
+- [x] LangGraph 编排版状态机（`app/agent/lg_graph.py`）：interrupt() 确认门 +
+      SqliteSaver checkpoint（断点续跑），`SHOPMATE_AGENT=lg` 切换，手写版保留
+- [x] LangChain 版检索器（`app/retrieval/lc_retriever.py`）：langchain_chroma
+      向量路 + 共用融合段，`SHOPMATE_RETRIEVER=lc` 切换；双版评测逐项一致
+      （均为 90 / 94 / 96 / 100）
 - [x] ~~MySQL / Redis 接入~~ → 主动不做，理由见文末「明确不做」
 - [x] ~~多用户支持~~ → 注入点已收口（D6），接登录态时改一处即可
 
 ## 技术栈
 
-Python 3.10+ · ChromaDB · BGE-M3(FlagEmbedding) · rank-bm25 · jieba · DeepSeek API
-(OpenAI 兼容) · Streamlit（演示前端）· SQLite（演示数据）
-MySQL / Redis 的方案已设计但**演示规模不接**，理由见文末「明确不做」。
+Python 3.10+ · LangGraph（Agent 编排版）· LangChain（Embeddings/Chroma 集成）·
+ChromaDB · BGE-M3(FlagEmbedding) · rank-bm25 · jieba · DeepSeek API
+(OpenAI 兼容) · Streamlit（演示前端）· SQLite（演示数据 + checkpoint 落盘）
 
-> 状态机是**自研**的（`app/agent/graph.py` 手写分支 + 显式 Session 状态），没用 LangGraph。
-> `requirements.txt` 只列代码真正 import 的 6 个直接依赖，早期探索留下的
-> langchain / langgraph 已移除（它们从未被引用）。
+> **手写与框架并存，两种实现可切换**（2026-09 起）：
+> - 状态机：手写版 `app/agent/graph.py`（分支 + 显式 Session）与 LangGraph 版
+>   `app/agent/lg_graph.py`（StateGraph + `interrupt()` 确认门 + SqliteSaver
+>   checkpoint，断点续跑）同任务并存；`SHOPMATE_AGENT=lg` 切换，默认手写版。
+> - 检索器：手写版 `app/retrieval/retriever.py`（chromadb 直连）与 LangChain 版
+>   `app/retrieval/lc_retriever.py`（langchain_chroma + Embeddings 接口）共用同一
+>   融合段（RRF/词法门/加权/阈值在 `retriever._fuse_and_format`），评测集证明两版
+>   逐项一致；`SHOPMATE_RETRIEVER=lc` 切换，默认手写版。
+> - 早期探索遗留的 langchain 曾因"从未被引用"移除，本次是带着手写理解后的换回，
+>   `requirements.txt` 只列代码真正 import 的包。
+> MySQL / Redis 的方案已设计但**演示规模不接**，理由见文末「明确不做」。
 
 ## 已知局限（如实写，防止面试官问穿）
 

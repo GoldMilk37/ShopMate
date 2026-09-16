@@ -7,4 +7,5 @@ __pycache__/
 # data/logs/ 是工具调用日志。二者每次运行都会变化，不该进版本库。
 data/chroma/
 data/logs/
-
+# LangGraph checkpoint 落盘文件（lg 版确认门断点续跑用，运行产物）
+data/graph_checkpoints.sqlite3

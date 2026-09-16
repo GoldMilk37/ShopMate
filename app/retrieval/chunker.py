@@ -49,12 +49,15 @@ def chunk_all(docs: list[RawDoc]) -> list[Chunk]:
         pieces = chunk_document(d)          # 切块（含超长对半，通用规则 a/c 在里面）
         for i, text in enumerate(pieces, start=1):
             anchor = _anchor(d.product_id, name_by_pid, brand_by_pid)  # 通用规则 b
+            cid = f"{d.doc_id}#{i:02d}"
             chunks.append(Chunk(
                 doc_id=d.doc_id,
-                chunk_id=f"{d.doc_id}#{i:02d}",
+                chunk_id=cid,
                 text=f"{anchor}{text}" if anchor else text,
+                # chunk_id 也进 meta：LangChain 版检索器（lc_retriever）从
+                # Document.metadata 里取 ID，Chroma 的 ids 字段它拿不到
                 meta={**d.meta, "doc_type": d.doc_type, "product_id": d.product_id,
-                      "collection": d.collection},   # indexer 按 meta["collection"] 分组入库
+                      "collection": d.collection, "chunk_id": cid},   # indexer 按 meta["collection"] 分组入库
             ))
     return chunks
 

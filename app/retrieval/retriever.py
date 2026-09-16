@@ -116,6 +116,17 @@ def search(query: str, collection: str = "product_knowledge",
     # 两路各自召回到候选排名（D3 的输入），两路都要受同一份 where 约束（D6）
     vector_ranks = _vector_route(query, collection, top_k, where)
     bm25_ranks = _bm25_route(query, collection, top_k, where)
+    return _fuse_and_format(query, collection, top_k, where, vector_ranks, bm25_ranks)
+
+
+def _fuse_and_format(query: str, collection: str, top_k: int, where: dict | None,
+                     vector_ranks: list, bm25_ranks: list) -> list[dict]:
+    """RRF 融合之后的公共段：词法置信门 → doc_type 加权 → 阈值兜底 → 截断。
+
+    抽成独立函数是给 LangChain 版检索器（lc_retriever）复用的——它只换
+    向量路的实现（langchain_chroma），融合语义必须与本版逐字节一致，否则
+    评测对照失去意义。本函数不含任何检索动作，只做纯计算。
+    """
     fused = _rrf([vector_ranks, bm25_ranks])
 
     # 词法置信门：向量路零支持的候选，词法巧合是唯一来源，要求 ≥2 个

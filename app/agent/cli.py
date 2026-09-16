@@ -15,7 +15,7 @@
 import random
 import time
 
-from .graph import agent
+from .runtime import get_agent
 from .session import store
 from .trace_view import render_text
 
@@ -24,6 +24,8 @@ def main() -> None:
     import sys
     if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
         sys.stdout.reconfigure(encoding="utf-8")
+
+    agent = get_agent()   # SHOPMATE_AGENT=lg 切 LangGraph 版（runtime.py D1）
 
     sid = f"s-{time.strftime('%H%M%S')}-{random.randint(100, 999)}"
     print("=" * 56)

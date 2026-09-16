@@ -24,8 +24,7 @@
 用法：python -m app.retrieval.eval
 产出：多路 hit@5 对比 + 每路的未命中 query 清单（调阈值/加权前先看这个）。
 """
-from .retriever import search, search_with_product_focus
-from .retriever import _vector_route, _bm25_route, TOP_K
+from .retriever import TOP_K
 
 # ---- 评测集（D1：可接受文档集合；顺序：query, collection, 期望 doc_id 集合） ----
 EVAL_SET: list[tuple[str, str, set[str]]] = [
@@ -129,28 +128,39 @@ def _hit(query: str, collection: str, allowed: set[str],
 
 
 def main() -> None:
+    import os
     import sys
     if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
         sys.stdout.reconfigure(encoding="utf-8")
 
     assert len(EVAL_SET) >= 50, f"评测集不足 50 条: {len(EVAL_SET)}"
 
+    # 检索实现二选一（D3 双版对照的延伸）：SHOPMATE_RETRIEVER=lc 走 LangChain 版
+    # （langchain_chroma 向量路），默认手写版。评测集是两版共同的回归网——
+    # 换实现跑一遍，hit@5 不降且与另一版未命中清单一致，才算换得干净。
+    if os.environ.get("SHOPMATE_RETRIEVER", "").lower() in ("lc", "langchain"):
+        from . import lc_retriever as impl
+        impl_name = "LangChain 版（langchain_chroma 向量路）"
+    else:
+        from . import retriever as impl
+        impl_name = "手写版（chromadb 直连向量路）"
+
     # 预热两个懒加载资源（BM25 索引 / BGE-M3），否则首轮计时失真无妨、首轮报错难查
     modes: dict[str, list[tuple[bool, list[str]]]] = {"vector": [], "bm25": [], "hybrid": [], "focus": []}
     misses: dict[str, list[str]] = {"vector": [], "bm25": [], "hybrid": [], "focus": []}
 
     def hybrid_route(query, c, k):
-        return [(r["chunk_id"], i) for i, r in enumerate(search(query, c), 1)]
+        return [(r["chunk_id"], i) for i, r in enumerate(impl.search(query, c), 1)]
 
     def focus_route(query, c, k):
         """第四路：混合 + 话题商品倾斜（Agent 层 product_id 槽位的落地形态）。"""
         return [(r["chunk_id"], i)
                 for i, r in enumerate(
-                    search_with_product_focus(query, c, QUERY_FOCUS.get(query, "")), 1)]
+                    impl.search_with_product_focus(query, c, QUERY_FOCUS.get(query, "")), 1)]
 
     for q, coll, allowed in EVAL_SET:
-        h_v, _ = _hit(q, coll, allowed, _vector_route)
-        h_b, _ = _hit(q, coll, allowed, _bm25_route)
+        h_v, _ = _hit(q, coll, allowed, impl._vector_route)
+        h_b, _ = _hit(q, coll, allowed, impl._bm25_route)
         h_m, _ = _hit(q, coll, allowed, hybrid_route)
         h_f, _ = _hit(q, coll, allowed, focus_route)
         for name, h in (("vector", h_v), ("bm25", h_b), ("hybrid", h_m), ("focus", h_f)):
@@ -159,7 +169,7 @@ def main() -> None:
                 misses[name].append(f"[{coll.split('_')[0]}] {q}  期望:{sorted(allowed)}")
 
     n = len(EVAL_SET)
-    print(f"评测集 {n} 条，hit@5 多路对比（01 文档 §7）：")
+    print(f"评测集 {n} 条，hit@5 多路对比（01 文档 §7）——检索实现：{impl_name}")
     base = None
     hits_of: dict[str, int] = {}
     for name in ("vector", "bm25", "hybrid", "focus"):
