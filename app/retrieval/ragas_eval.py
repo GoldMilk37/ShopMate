@@ -85,9 +85,16 @@ class BgeM3Embeddings:
 class _NoMultiGen:
     """裁判包装：剥掉每次调用里的 n>1 参数。
 
-    RAGAS 的 answer_relevancy 会请裁判一次生成多个答案变体（n=5），
-    但 DeepSeek 端点只支持 n=1（400 报错）。Qwen 端点没这个限制，
-    包装对两边都无害——n=1 时指标少一层抽样平均，分数语义不变。
+    RAGAS 的 answer_relevancy 会请裁判一次生成多个答案变体（反解问题，
+    strictness 默认 3），再对它们与原问题的向量余弦相似度取平均。
+    DeepSeek 端点收 n>1 会 400，所以必须剥。
+
+    **注意别指望对 Qwen 放行 n 就能拿回那个平均。** 2026-09-17 试过：
+    不剥 n 之后日志里照样是 `LLM returned 1 generations instead of requested 3`
+    ——langchain 这条路径根本没把 n 传到请求体，剥与不剥**实测等价**（同一批
+    样本两次打分逐位相同）。所以 answer_relevancy 在这里**拿不到抽样平均这层
+    保护**，它的方差只能靠多跑几轮来观察（见 docs/01 §七的实测记录）。
+    想要那层平均得绕开 langchain 直接用 ragas 的 llm_factory，是另一件事。
 
     必须继承 BaseChatModel 而不是鸭子类型包装：RAGAS 只对它认识的
     chat model 做 LangchainLLMWrapper 自动包装，自造对象会走错调用路径。
@@ -95,12 +102,17 @@ class _NoMultiGen:
 
     def __init__(self, **kwargs):
         from langchain_openai import ChatOpenAI
+        from app.llm.client import build_http_client, build_async_http_client
         self._cls = type("_Judge", (ChatOpenAI,), {
             # 生成入口统一在这两个钩子，n>1 在进入请求体前剥掉
             "_generate": _strip_n(ChatOpenAI._generate),
             "_agenerate": _strip_n(ChatOpenAI._agenerate),
         })
-        self._inner = self._cls(**kwargs)
+        # 裁判也得走 D5 的代理策略：ChatOpenAI 不传 http_client 就自建默认客户端
+        # （trust_env=True），于是又去读 Windows 注册表里那个 scheme 写错的系统代理，
+        # 报出来的还是那句和网络无关的 EOF。—— 两个客户端都要给，RAGAS 打分走 async。
+        self._inner = self._cls(http_client=build_http_client(),
+                                http_async_client=build_async_http_client(), **kwargs)
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -130,12 +142,30 @@ def build_samples(n: int) -> list[dict]:
         docs = "\n\n".join(
             f"【资料{i}】({h['meta'].get('doc_type', '')} | {h['meta'].get('product_id', '')})\n{h['text']}"
             for i, h in enumerate(hits, 1))
-        reply = llm.safe_call(llm.chat_text, [
-            {"role": "system", "content": RAG_PROMPT},
-            {"role": "user", "content": f"【资料】\n{docs}\n\n【用户问题】{q}"},
-        ])
-        if reply is None:
-            print(f"[ragas] 生成失败，跳过: {q}")
+        reply = None
+        for attempt in (1, 2):
+            reply = llm.safe_call(llm.chat_text, [
+                {"role": "system", "content": RAG_PROMPT},
+                {"role": "user", "content": f"【资料】\n{docs}\n\n【用户问题】{q}"},
+            ])
+            # None = 没调通（safe_call 给的），"" = 调通了但模型没吐字——client.chat_text
+            # 刻意区分这两件事，graph.py 也分开处理（空串按"资料没覆盖"兜底）。
+            # 但**评测**不能这么兜：那两行代码是在替用户回话，而 RAGAS 是在量模型的
+            # 输出质量。往样本里塞一条空回复，等于让三个指标去给空字符串打分，出来的
+            # 数不属于任何东西。所以这里既不兜底也不采信，重试一次、再空就跳过。
+            #
+            # 注意措辞的边界：这条分支是**防御性**的，不是"实测到大量空回复"——
+            # 我一度以为 2026-09-17 那 15 条里有 5 条空回复，那是读错了
+            # ragas_results.json（它压根不存 response 字段，`.get('response','')`
+            # 读的是默认值）。真正的 4 个 0.00 是 answer_relevancy 的抽样方差，
+            # 与空回复无关，见 _NoMultiGen。别把这两件事混起来。
+            if reply and reply.strip():
+                break
+            if attempt == 1:
+                print(f"[ragas] 空回复，重试一次: {q}")
+        if reply is None or not reply.strip():
+            why = "未调通" if reply is None else "空回复"
+            print(f"[ragas] 生成失败（{why}），跳过: {q}")
             continue
         samples.append({
             "user_input": q,
@@ -147,11 +177,22 @@ def build_samples(n: int) -> list[dict]:
 
 
 def load_ground_truth() -> dict[str, str]:
-    """D3：读人工标注。文件不存在/条目没标 → 空串，依赖它的指标跳过。"""
+    """D3：读人工标注。文件不存在/条目没标 → 空串，依赖它的指标跳过。
+
+    每条的值是 `{collection, retrieved_contexts, ground_truth}` 三字段的**字典**
+    （见 dump_template），所以**不能对 v 直接 .strip()**——那会
+    `AttributeError: 'dict' object has no attribute 'strip'`。这里按字段取。
+    同时兼容"直接写成字符串"的简写形态，免得填法被实现绑死。
+    """
     if not GT_FILE.exists():
         return {}
     data = json.loads(GT_FILE.read_text(encoding="utf-8"))
-    return {k: v for k, v in data.items() if v.strip()}
+    out: dict[str, str] = {}
+    for k, v in data.items():
+        text = v.get("ground_truth", "") if isinstance(v, dict) else v
+        if isinstance(text, str) and text.strip():
+            out[k] = text
+    return out
 
 
 def dump_template() -> None:
@@ -169,6 +210,14 @@ def dump_template() -> None:
     GT_FILE.write_text(json.dumps(template, ensure_ascii=False, indent=2),
                        encoding="utf-8")
     print(f"模板已写入 {GT_FILE}（{len(template)} 条），填 ground_truth 字段后重跑。")
+
+    # 写完立刻用 load_ground_truth 读回来过一遍。模板是嵌套字典、读取端要的是字符串，
+    # 这两边一旦对不上，症状是**填完标注、跑分时才**AttributeError（且冒烟测试查不出来：
+    # 那会儿文件还不存在，load_ground_truth 在 exists() 那行就返回了）。
+    # 空模板读回来必须是 0 条且不抛——这一行就是那个契约的可执行版本。
+    back = load_ground_truth()
+    assert back == {}, f"模板回读异常：期望 0 条（都还没填），实得 {len(back)} 条"
+    print("回读自检通过：模板能过 load_ground_truth，空标注返回 0 条。")
 
 
 async def main() -> None:
@@ -197,8 +246,12 @@ async def main() -> None:
     print(f"生成评测样本（{n} 条，检索 + DeepSeek 生成）……")
     samples = build_samples(n)
     if not samples:
+        # 必须非零退出：这行曾经是 `return`，于是**全军覆没也报 exit 0**——
+        # 2026-09-17 网络挂掉那轮，15 条一条没生成，脚本干干净净地"成功"了。
+        # 终端里看得见，但任何按退出码判断的调用方（我自己的重跑、将来的 CI）
+        # 都会把它当成跑过了。
         print("没有可用样本（生成全失败？），终止。")
-        return
+        raise SystemExit(1)
 
     gt = load_ground_truth()
     for s in samples:
@@ -209,7 +262,13 @@ async def main() -> None:
     # ---- RAGAS 组装（懒 import：--dump-template 不该背上这套依赖） ----
     from ragas import SingleTurnSample
     from ragas.llms import LangchainLLMWrapper
-    from ragas.metrics import answer_relevancy, faithfulness
+    # context_precision 这两个名字原先漏了 import：它们只在 `if n_gt:` 分支里用到，
+    # 而标注文件空着时那个分支永远不执行——所以"没标注"和"有标注"两条路上的
+    # 脚手架各只跑通一半，合起来才是完整的。补 import 时注意 collections 那个路径
+    # 在 0.4.3 下是个 module、没有 single_turn_ascore，跟下面的调用方式不兼容，
+    # 别照 DeprecationWarning 的字面去改。
+    from ragas.metrics import (LLMContextPrecisionWithoutReference, answer_relevancy,
+                               context_precision, faithfulness)
 
     dataset = [SingleTurnSample(
         user_input=s["user_input"],

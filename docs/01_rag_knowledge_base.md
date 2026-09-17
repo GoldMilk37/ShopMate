@@ -269,22 +269,62 @@ hit@5 在第四路（锚点）上已顶到 100%，指标饱和——"进没进�
   的收益是 fixed 策略结构上给不了的。若未来只做检索不做生成（如纯
   搜索接口），fixed256 是值得考虑的便宜方案。
 
-### 生成侧评测：RAGAS（脚手架已通，正式分数待异族裁判）
+### 生成侧评测：RAGAS（15 条试跑已出数，异族裁判）
 
 检索指标只能证明"找得准"，证不了"答得没编"。生成侧引入 RAGAS
 （`app/retrieval/ragas_eval.py`），三个指标：faithfulness（忠于资料否）、
 answer_relevancy（答到点否）、context_precision（相关资料排得靠前否，
-与 MRR 互证）。当前状态：
+与 MRR 互证）。
 
-- 流程已跑通（3 条冒烟：faithfulness 0.78 / answer_relevancy 0.87），
-  裁判复用 DeepSeek——**同族裁判有自评偏好，这组数字只证明管线通，
-  不作质量结论**。正式跑分需配 DASHSCOPE_API_KEY 换 Qwen 当裁判。
-- 50 条标注模板已生成（`data/eval/ragas_ground_truth.json`），
-  ground_truth 人工填好后 context_precision 自动加入跑分。
-- 落地时踩平的坑：ragas 0.4.3 与 langchain-community 0.4 不兼容
-  （降 0.3.31）；DeepSeek 端点不支持 n>1（answer_relevancy 默认请裁判
-  一次生成 5 个变体，须在请求层剥掉 n 参数）；BGE-M3 必须在进 RAGAS
-  事件循环前预热，否则 transformers 联网查 chat template 挂起。
+**裁判是 qwen-plus（阿里云百炼），与生成侧 DeepSeek 不同族**——这一条是
+分数可用的前提：同族裁判是让模型评自己，有自评偏好，分数虚高。脚本里
+`_pick_judge()` 有 DASHSCOPE_API_KEY 就用 Qwen，没有才退回 DeepSeek 并打
+警告横幅，**回退模式出的分不能写进文档**。
+
+#### 实测（2026-09-17，评测集前 15 条，50 条标注已人工填齐）
+
+| 指标 | 分数 | 可信度 |
+|---|---|---|
+| faithfulness | **0.871** | 可用 |
+| context_precision | **0.812** | 可用（15 条里有 1 个 0） |
+| answer_relevancy | 0.542 | **不可信，见下** |
+
+#### ⚠️ answer_relevancy 这 0.542 别当结论用
+
+15 条里出现了 **4 个精确的 0.000**，而逐个查下去，它们**不是"模型答得差"**：
+
+- **不是空回复**（我一度这么以为，是错的——`ragas_results.json` 根本不存
+  `response` 字段，`.get('response','')` 读的是默认值，于是 15 条**全部**
+  显示为空串，而我只打印了零分那几条，正好把错觉坐实）。
+- **不是 n=1 抽掉了平均**。试过对 Qwen 放行 `n`，日志里照样是
+  `LLM returned 1 generations instead of requested 3`——langchain 这条路径
+  压根没把 n 传进请求体，剥与不剥实测等价（同一批样本两次打分逐位相同）。
+  想要那层抽样平均得绕开 langchain 直接用 ragas 的 `llm_factory`。
+- **是生成侧的不确定性传导过来的**。RAG 生成用 `temperature=0.3`，同一 query
+  每轮回复都不同；反解问题（用答案反推问题，再与原问题比向量余弦）对措辞
+  敏感，某一份回复会让反解跑偏、余弦塌到 0。同一条 query 复跑：一次 0.000、
+  一次 0.8127（回复 175 字，反解问题问得又准又对）。
+
+**所以这个指标的分数由"这一轮生成恰好长什么样"主导，不是由模型质量主导。**
+要报它就得报分布（多跑几轮看区间），不能报单轮均值。faithfulness 和
+context_precision 没有这个反解步骤，不受影响。
+
+#### 落地时踩平的坑
+
+- ragas 0.4.3 与 langchain-community 0.4 不兼容（降 0.3.31）
+- DeepSeek 端点不支持 n>1（400），须在请求层剥掉 n 参数
+- BGE-M3 必须在进 RAGAS 事件循环前预热，否则 transformers 联网查
+  chat template 挂起
+- 裁判和生成两侧的 HTTP 客户端都得显式 `trust_env=False`，否则会去读
+  Windows 注册表里的系统代理并报一句与网络无关的 TLS EOF
+  （详见 `app/llm/client.py` 的 D5 与 README「环境坑」）
+
+#### 待办
+
+以上是 **15 条试跑**。HANDOFF 里的正式跑分是全量 50 条
+（`RAGAS_N=50 python -m app.retrieval.ragas_eval`），跑完把三项数字替换上表。
+考虑到 answer_relevancy 的方差，全量之外还值得再跑一轮同配置，用两次的
+区间代替单点。
 
 ⚠️ 注意评测集的覆盖边界：`eval.py` 有 12 条 `review_knowledge` 用例，但它们
 **直接指定了 collection**，测的是"给对了库能不能召回"，不是"Agent 会不会选对
