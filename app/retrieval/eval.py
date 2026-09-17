@@ -196,7 +196,13 @@ def main() -> None:
     n = len(EVAL_SET)
     print(f"评测集 {n} 条，多路对比（01 文档 §7）——检索实现：{impl_name}")
     print(f"  {'route':8s} {'hit@5':>8s} {'hit@1':>8s} {'MRR':>8s}")
-    for name in routes:
+    # 只列真正跑过的路。rerank 未启用时 modes["rerank"] 是空表，而这里除的是
+    # 评测集大小 n（=50）而不是该路的样本数，所以空表**不会**报 ZeroDivisionError，
+    # 只会安静地印出一行 `rerank 0% 0% 0.000`——纯属虚构的数字，比不印更糟：
+    # 照 README/docs 跑的人（命令里不带 SHOPMATE_RERANK=1）会以为 rerank 坏了，
+    # 或者把 0% 当结论抄走。缺哪路就在上面用一行说明交代（见 rerank 未跑时的提示）。
+    ran = [r for r in routes if modes[r]]
+    for name in ran:
         h5 = sum(1 for m in modes[name] if m[0])
         h1 = sum(1 for m in modes[name] if m[1])
         mrr = sum(m[2] for m in modes[name]) / n
