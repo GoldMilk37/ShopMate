@@ -24,6 +24,9 @@
        safe_call 失败时**必须打印真实异常**：上层普遍有 except Exception
        兜底（intent 的 D3、graph 的 D9），异常到那儿就被吞了，这里是
        唯一还看得见原因的地方。
+    D5 不认系统代理：Windows 注册表里的代理会让 httpx 拿着写错 scheme 的
+       地址去 TLS 握手，报一句和"网络"毫无关系的 EOF。只有显式设了
+       HTTPS_PROXY 才走代理。详见 build_http_client。
 
 依赖链：intent.classify / graph 的生成与工具编排都只 import 这里。
 """
@@ -59,6 +62,44 @@ _client = None
 _lock = threading.Lock()
 
 
+def _proxy_from_env() -> str | None:
+    """D5：只认显式环境变量。抽成纯函数是为了让自测能断言决策本身，
+    而不必去翻 httpx 内部的 mounts（那是会随版本变的实现细节）。"""
+    return os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or None
+
+
+def build_http_client():
+    """D5：同步 httpx 客户端——显式代理才走代理，系统/注册表代理一律不认。
+
+    为什么不能让 openai/httpx 用默认的 trust_env=True：Windows 上它会经
+    `urllib.request.getproxies()` 读到**注册表**里的系统代理（Clash 的
+    "系统代理"开关就写这张表），而那个值是 `127.0.0.1:7890`——**不带 scheme**，
+    urllib 于是给 https 补成 `https://127.0.0.1:7890`。httpx 拿着它去对一个
+    只说 HTTP 的代理发 TLS 握手，得到：
+
+        httpcore.ConnectError: EOF occurred in violation of protocol (_ssl.c:997)
+
+    这个故障最坑的地方是**环境变量里看不到任何代理**（`env | grep -i proxy` 空），
+    而 `curl` 不读注册表，所以"curl 探着通、脚本却连不上"会同时成立——现象长成
+    "网络时好时坏"，实际是 Clash 开关在改注册表那张表。
+
+    规矩：**设了 HTTPS_PROXY 就走代理（那是真要想走），没设就直连**。系统代理
+    这种"我没说过要用"的隐性输入，不参与决策。
+    """
+    import httpx
+    proxy = _proxy_from_env()
+    return httpx.Client(proxy=proxy, trust_env=False) if proxy else httpx.Client(trust_env=False)
+
+
+def build_async_http_client():
+    """D5 的异步版。RAGAS 裁判走 async 路径，少了这个它会自己建默认客户端，
+    等于把刚堵上的口子又从旁边留回来。"""
+    import httpx
+    proxy = _proxy_from_env()
+    return (httpx.AsyncClient(proxy=proxy, trust_env=False) if proxy
+            else httpx.AsyncClient(trust_env=False))
+
+
 def get_client():
     """D2：返回单例客户端。缺 key 抛 RuntimeError，报错里带补救指引。"""
     global _client
@@ -73,7 +114,8 @@ def get_client():
                     "    DEEPSEEK_API_KEY=sk-你的key\n"
                     "（.env 已被 git 忽略，不会提交）")
             from openai import OpenAI
-            _client = OpenAI(base_url=BASE_URL, api_key=key)
+            _client = OpenAI(base_url=BASE_URL, api_key=key,
+                             http_client=build_http_client())   # D5
     return _client
 
 
@@ -93,7 +135,14 @@ def chat(messages: list[dict], *, tools: list | None = None,
 
 
 def chat_text(messages: list[dict], *, temperature: float = 0.3) -> str:
-    """便捷版：只要文本。工具编排别用这个（拿不到 tool_calls）。"""
+    """便捷版：只要文本。工具编排别用这个（拿不到 tool_calls）。
+
+    **返回 "" 是"调通了但模型没吐字"，与 None 是两件事**：None 表示压根没调通
+    （由 safe_call 给出），"" 表示 HTTP 200 但 content 为空。调用方**要分开处理**，
+    别把空串并进失败里——graph.py 就是这么写的（空串按"资料没覆盖"兜底，注释在
+    那儿），那是刻意的区分，不是漏写。2026-09-17 实测 DeepSeek 会偶发返回空
+    content（15 条样本 5 条为空，复跑同一条 query 又正常）。
+    """
     return chat(messages, temperature=temperature).content or ""
 
 
@@ -189,3 +238,24 @@ if __name__ == "__main__":
     assert safe_call(_auth_fail) is None
     assert len(auth_calls) == 1, f"认证类错误不该重试，实际 {len(auth_calls)} 次"
     print(f"3 safe_call 重试判据: 抖动试 {len(conn_calls)} 次 / 认证只试 {len(auth_calls)} 次，均返回 None")
+
+    # 4. D5 的代理决策（不联网）
+    saved_px = {k: os.environ.pop(k, None) for k in ("HTTPS_PROXY", "https_proxy")}
+    try:
+        assert _proxy_from_env() is None, "没设环境变量时不该凭空冒出代理（注册表那份必须无视）"
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7890"
+        assert _proxy_from_env() == "http://127.0.0.1:7890", "显式设了就该走"
+        os.environ.pop("HTTPS_PROXY")
+        os.environ["https_proxy"] = "http://127.0.0.1:7890"
+        assert _proxy_from_env() == "http://127.0.0.1:7890", "小写形式同样认"
+        build_http_client().close()         # 建得出来即可，不联网
+    finally:
+        for k, v in saved_px.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    # 回归断言：真实环境里系统代理是开着的（注册表），决策必须仍然是不走
+    assert _proxy_from_env() is None, "环境变量空着就必须直连，哪怕系统代理开着"
+    print(f"4 D5 代理决策: 环境变量空 → 直连（系统代理 ProxyEnable=1 也被无视）；"
+          f"设了 HTTPS_PROXY → 走它")
