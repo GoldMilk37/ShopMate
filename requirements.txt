@@ -24,6 +24,9 @@ langgraph==1.2.11                    # Agent 编排（StateGraph/interrupt/Sqlit
 langgraph-checkpoint-sqlite==3.1.1   # checkpoint 持久化（确认门断点续跑）
 langchain-core==1.6.3                # Embeddings 接口协议（BGEEmbeddings 实现）
 langchain-chroma==1.1.0              # Chroma 向量库集成（LangChain 版检索器）
+langchain-community==0.3.31          # ragas 的 LLM wrapper 依赖它的 chat models
+langchain-openai==1.1.9              # RAGAS 裁判模型客户端（OpenAI 兼容端点）
+ragas==0.4.3                         # RAGAS 生成侧评测（faithfulness 等三指标）
 
 # --- 演示前端 ---
 streamlit==1.63.0        # app/agent/webui.py；测试用的 AppTest 也在这个包里

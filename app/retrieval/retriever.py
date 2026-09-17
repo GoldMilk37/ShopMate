@@ -46,6 +46,7 @@
 依赖链：search ⊂ indexer.get_collection/get_model/embed_texts（D1 伏笔）。
 命令行用法：python -m app.retrieval.retriever "查询词"
 """
+import os
 import sys
 
 import jieba
@@ -117,6 +118,30 @@ def search(query: str, collection: str = "product_knowledge",
     vector_ranks = _vector_route(query, collection, top_k, where)
     bm25_ranks = _bm25_route(query, collection, top_k, where)
     return _fuse_and_format(query, collection, top_k, where, vector_ranks, bm25_ranks)
+
+
+# 精排候选池：初检求"全"多召回一些（top 20），精排求"准"再挑 top_k。
+# 太小精排没得挑，太大模型慢；20 在 50 条评测集上是精度/耗时的折中。
+RERANK_CANDIDATES = 20
+
+
+def search_reranked(query: str, collection: str = "product_knowledge",
+                    top_k: int = TOP_K, where: dict | None = None) -> list[dict]:
+    """两阶段检索：混合初检 top20 → cross-encoder 精排 → 取 top_k。新增。
+
+    返回格式与 search() 一致（score 字段换成 rerank 分）。开关语义：
+    环境变量 SHOPMATE_RERANK=1 才启用，默认走 search() 原路径——保留
+    两条路才能跑第五路对照（eval.py），也方便线上出问题随时切回。
+    无答案判定不在精排层（reranker.py D4）：初检融合结果为空就直接
+    返回 []，阈值口径只有一套。
+    """
+    if os.environ.get("SHOPMATE_RERANK", "").strip() not in ("1", "true", "yes"):
+        return search(query, collection, top_k, where)
+    candidates = search(query, collection, RERANK_CANDIDATES, where)
+    if not candidates:
+        return []
+    from .reranker import rerank
+    return rerank(query, candidates)[:top_k]
 
 
 def _fuse_and_format(query: str, collection: str, top_k: int, where: dict | None,

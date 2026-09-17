@@ -9,3 +9,8 @@ data/chroma/
 data/logs/
 # LangGraph checkpoint 落盘文件（lg 版确认门断点续跑用，运行产物）
 data/graph_checkpoints.sqlite3
+
+# reranker 模型快照与对比实验库 / RAGAS 评测产物（可重建，见 docs/01 §七）
+models/
+data/chroma_compare/
+data/eval/

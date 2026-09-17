@@ -119,12 +119,22 @@ QUERY_FOCUS: dict[str, str] = {
 }
 
 
-def _hit(query: str, collection: str, allowed: set[str],
-         route) -> tuple[bool, list[str]]:
-    """route(query, coll, k) → [(chunk_id, rank)]；判文档级命中（D2）。"""
+def _rank_metrics(query: str, collection: str, allowed: set[str],
+                  route) -> tuple[bool, bool, float, list[str]]:
+    """route(query, coll, k) → [(chunk_id, rank)]；文档级判定（D2）。
+
+    返回 (hit@5, hit@1, 倒数排名, 文档序列)。倒数排名：首个可接受文档
+    排第 i 位记 1/i，top5 内没有则记 0——hit@5 顶满后，MRR/hit@1 才能区分
+    "排第 1"和"刚好挤进第 5"（第 0 步新增，对应 HANDOFF 饱和问题）。
+    """
     ranked = route(query, collection, TOP_K)
     docs = [cid.split("#")[0] for cid, _ in ranked]
-    return any(d in allowed for d in docs), docs
+    rr = 0.0
+    for i, d in enumerate(docs, 1):
+        if d in allowed:
+            rr = 1.0 / i
+            break
+    return rr > 0, docs[:1] != [] and docs[0] in allowed, rr, docs
 
 
 def main() -> None:
@@ -146,8 +156,10 @@ def main() -> None:
         impl_name = "手写版（chromadb 直连向量路）"
 
     # 预热两个懒加载资源（BM25 索引 / BGE-M3），否则首轮计时失真无妨、首轮报错难查
-    modes: dict[str, list[tuple[bool, list[str]]]] = {"vector": [], "bm25": [], "hybrid": [], "focus": []}
-    misses: dict[str, list[str]] = {"vector": [], "bm25": [], "hybrid": [], "focus": []}
+    # 每条记录 (hit@5, hit@1, 倒数排名)；misses 只对 hit@5 落空的记录
+    routes = ("vector", "bm25", "hybrid", "focus", "rerank")
+    modes: dict[str, list[tuple[bool, bool, float]]] = {r: [] for r in routes}
+    misses: dict[str, list[str]] = {r: [] for r in routes}
 
     def hybrid_route(query, c, k):
         return [(r["chunk_id"], i) for i, r in enumerate(impl.search(query, c), 1)]
@@ -158,26 +170,39 @@ def main() -> None:
                 for i, r in enumerate(
                     impl.search_with_product_focus(query, c, QUERY_FOCUS.get(query, "")), 1)]
 
+    def rerank_route(query, c, k):
+        """第五路：混合初检 top20 → cross-encoder 精排 → top5（两阶段检索）。
+        SHOPMATE_RERANK=1 时模型未就绪会直接 RuntimeError——这是提示而非静默。"""
+        return [(r["chunk_id"], i) for i, r in enumerate(impl.search_reranked(query, c), 1)]
+
+    route_fns = {
+        "vector": impl._vector_route,
+        "bm25": impl._bm25_route,
+        "hybrid": hybrid_route,
+        "focus": focus_route,
+    }
+    if os.environ.get("SHOPMATE_RERANK", "").strip() in ("1", "true", "yes"):
+        route_fns["rerank"] = rerank_route
+    else:
+        print("（rerank 路未跑：设 SHOPMATE_RERANK=1 并备好 bge-reranker 模型后重跑）")
+
     for q, coll, allowed in EVAL_SET:
-        h_v, _ = _hit(q, coll, allowed, impl._vector_route)
-        h_b, _ = _hit(q, coll, allowed, impl._bm25_route)
-        h_m, _ = _hit(q, coll, allowed, hybrid_route)
-        h_f, _ = _hit(q, coll, allowed, focus_route)
-        for name, h in (("vector", h_v), ("bm25", h_b), ("hybrid", h_m), ("focus", h_f)):
-            modes[name].append((h, []))
-            if not h:
+        for name, fn in route_fns.items():
+            h5, h1, rr, _ = _rank_metrics(q, coll, allowed, fn)
+            modes[name].append((h5, h1, rr))
+            if not h5:
                 misses[name].append(f"[{coll.split('_')[0]}] {q}  期望:{sorted(allowed)}")
 
     n = len(EVAL_SET)
-    print(f"评测集 {n} 条，hit@5 多路对比（01 文档 §7）——检索实现：{impl_name}")
-    base = None
-    hits_of: dict[str, int] = {}
-    for name in ("vector", "bm25", "hybrid", "focus"):
-        hits = sum(1 for h, _ in modes[name] if h)
-        hits_of[name] = hits
-        print(f"  {name:8s} {hits}/{n} = {hits / n:.0%}")
-        if name == "bm25":
-            base = hits / n
+    print(f"评测集 {n} 条，多路对比（01 文档 §7）——检索实现：{impl_name}")
+    print(f"  {'route':8s} {'hit@5':>8s} {'hit@1':>8s} {'MRR':>8s}")
+    for name in routes:
+        h5 = sum(1 for m in modes[name] if m[0])
+        h1 = sum(1 for m in modes[name] if m[1])
+        mrr = sum(m[2] for m in modes[name]) / n
+        print(f"  {name:8s} {h5 / n:>7.0%} {h1 / n:>7.0%} {mrr:>8.3f}")
+    base = sum(1 for m in modes["bm25"] if m[0]) / n
+    hits_of = {name: sum(1 for m in modes[name] if m[0]) for name in routes}
     print(f"\n混合 vs 纯 BM25 提升: {(hits_of['hybrid'] / n - base):+.0%}"
           f"（目标 ≥85% 且 +30%，见 01 文档 §一/§七）")
     print(f"话题倾斜 vs 混合: {hits_of['focus'] - hits_of['hybrid']:+d} 条"

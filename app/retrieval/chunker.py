@@ -32,8 +32,16 @@ MAX_CHUNK_CHARS = 750
 PARENT_TYPES = {"policy", "faq"}
 
 
-def chunk_all(docs: list[RawDoc]) -> list[Chunk]:
-    """批量入口：对每个文档切块，按商品拼锚点，产出可入库的 Chunk 列表。"""
+def chunk_all(docs: list[RawDoc], strategy: str = "typed") -> list[Chunk]:
+    """批量入口：对每个文档切块，按商品拼锚点，产出可入库的 Chunk 列表。
+
+    strategy（chunk 策略对比实验，任务 3）：
+        "typed"     现状：按文档类型选切法（设计表 docs/01 §四）
+        "fixed512"  统一固定长度 512 字符，无视结构
+        "fixed256"  统一固定长度 256 字符
+    后两种是对照组：验证"结构化切法相对无脑定长"在自己语料上的实际收益。
+    锚点与 meta 拼装对三种策略一视同仁——对比的变量只有切法本身。
+    """
     # D2：先扫一遍建"商品ID → 商品名/品牌"查找表（name 在 spec json 里）
     name_by_pid: dict[str, str] = {}
     brand_by_pid: dict[str, str] = {}
@@ -46,7 +54,7 @@ def chunk_all(docs: list[RawDoc]) -> list[Chunk]:
 
     chunks: list[Chunk] = []
     for d in docs:
-        pieces = chunk_document(d)          # 切块（含超长对半，通用规则 a/c 在里面）
+        pieces = chunk_document(d, strategy)     # 切块（含超长对半，通用规则 a/c 在里面）
         for i, text in enumerate(pieces, start=1):
             anchor = _anchor(d.product_id, name_by_pid, brand_by_pid)  # 通用规则 b
             cid = f"{d.doc_id}#{i:02d}"
@@ -62,8 +70,18 @@ def chunk_all(docs: list[RawDoc]) -> list[Chunk]:
     return chunks
 
 
-def chunk_document(doc: RawDoc) -> list[str]:
-    """单文档切块，返回块正文列表（还没拼锚点，锚点是全库层面的事）。"""
+def chunk_document(doc: RawDoc, strategy: str = "typed") -> list[str]:
+    """单文档切块，返回块正文列表（还没拼锚点，锚点是全库层面的事）。
+
+    fixed 策略把整篇正文（spec 先展平）交给 _split_long 定长切：
+    标题归属、节边界全部牺牲——这正是对照组要测的代价。
+    """
+    if strategy != "typed":
+        max_len = 512 if strategy == "fixed512" else 256
+        body = (_flatten_spec(doc.text) if doc.doc_type == "spec"
+                else doc.text)
+        return _split_long(body, max_len)
+
     if doc.doc_type == "spec":
         return _split_long(_flatten_spec(doc.text))
 
