@@ -31,8 +31,18 @@ ragas==0.4.3                         # RAGAS 生成侧评测（faithfulness 等�
 # --- 演示前端 ---
 streamlit==1.63.0        # app/agent/webui.py；测试用的 AppTest 也在这个包里
 
-# --- 规划中，换存储/拆服务时再取消注释 ---
-# fastapi      # 服务层（若前后端分离）
-# uvicorn      # FastAPI 的 ASGI 服务器
+# --- 薄服务层（app/api/） ---
+# fastapi 不是任何已装包的**硬**依赖（2026-09-18 实测：扫了本地 180 个已装包，
+# 对它的引用全部带 extra 标记——chromadb 的 dev、huggingface_hub 的 oauth/testing、
+# transformers 的 serving/testing）。所以**必须显式列**：不列的话别人 clone 下来
+# 按这份清单装完是 import 不到它的，服务层直接起不来。
+fastapi==0.141.1         # app/api/server.py；本地 .venv 实测值
+uvicorn==0.52.4          # ASGI 服务器，跑 app.api.server:app
+# 注：uvicorn 其实会被 streamlit / chromadb **传递带入**（它们对它是硬依赖），
+# 但 server.py 的 --serve 分支直接 import 了它，按文件头"只列真正 import 的包"
+# 的政策照样列出来并钉版本。
+# 另：httpx 不列。TestClient 要用它，但它是 openai/chromadb 的传递依赖，已在树里。
+
+# --- 规划中，换存储时再取消注释 ---    （拆服务已做，剩下的只是换存储）
 # PyMySQL      # 替换 SQLite
-# redis        # 替换进程内会话
+# redis        # 替换进程内会话。**换之前别加 worker** —— 没接 Redis 就多 worker 会串户

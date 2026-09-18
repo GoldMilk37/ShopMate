@@ -7,17 +7,20 @@
 耳机（4）· 冲锋衣（2）· 洗衣机（2）三个品类；订单数据里 `u1001` 有两笔
 （一笔在途可查物流，一笔已完成可走售后）。
 
-## 一、三条命令
+## 一、四条命令
 
 ### ① 演示前 30 秒自检（零成本、不联网）
 
 ```bash
 cd <项目根>
 .venv/Scripts/python.exe -m app.agent.webui --e2e
+.venv/Scripts/python.exe -m app.api.server           # 要演第 ④ 条时顺手跑一次
 ```
 
-期望最后一行是 `e2e 通过：…`。这条用 `streamlit.testing.v1.AppTest` 在同进程里
-执行整个前端脚本，断言"脚本真的跑起来了、一问一答进了会话、侧栏把轨迹画出来了"。
+期望最后一行分别是 `e2e 通过：…` 和 `自测通过：…`。前者用
+`streamlit.testing.v1.AppTest` 在同进程里执行整个前端脚本，断言"脚本真的跑起来了、
+一问一答进了会话、侧栏把轨迹画出来了"；后者用 `TestClient` 把 6 个端点全打一遍
+（14 组断言，同样不联网、零成本）。
 **演示前跑一次，比当场翻车强。**
 
 ### ② 浏览器演示（主战场）
@@ -41,6 +44,40 @@ cd <项目根>
 ```
 
 `/trace` 看本轮内部状态 · `/history` 看记忆几轮 · `/new` 换会话 · `/exit` 退出
+
+### ④ 无界面演示（HTTP 服务：讲"它能被别的程序调用"时用）
+
+```bash
+cd <项目根>
+.venv/Scripts/python.exe -m app.api.server --serve      # 绑 127.0.0.1:8000，单 worker
+# 8000 被占用时：加 --port 8001
+```
+
+另开一个终端：
+
+```bash
+curl 127.0.0.1:8000/health                              # 存活 + 单 worker 证据
+curl 127.0.0.1:8000/tools                               # 6 个工具 + 读写分级
+curl -X POST 127.0.0.1:8000/chat -H "Content-Type: application/json" \
+     -d '{"message":"SKU-10001 续航多久"}'
+```
+
+浏览器打开 **`http://127.0.0.1:8000/docs`**——这是 FastAPI 照 Pydantic 模型自动生成的
+交互式文档，可以直接在页面上点 "Try it out" 发请求。**这一页比 curl 更适合投屏**：
+它自己就是"这个服务能干什么"的说明书。
+
+`POST /chat` 的响应里有本轮完整轨迹（`trace.summary` / `trace.hits` / `trace.tools`），
+其中 **`trace.text` 与 CLI 的 `/trace` 命令逐字一致**（同一个 `trace_view.render_text`）——
+curl 完不用解释，对方自己看得懂。
+
+> ⚠️ **两个进程各有各的内存会话，互不可见。** API 进程和 Streamlit 进程是两个独立的
+> Python 进程，各持一份 `SessionStore`。同一个 session_id 在两边查到的**不是**同一份会话：
+> 在浏览器里聊了几轮，`curl /sessions/{那个 sid}` 会返回 **404**（不是 bug）。
+> 演示时**别交叉**——要么全程浏览器，要么全程 curl。
+>
+> ⚠️ **别用 `--reload` 演示。** 改一个注释就会重启 worker、**把内存里的会话全清空**，
+> 对话记录当场没了。`/health` 的 `uptime_s` 归零就是这件事的信号（pid 看不出来，reload
+> 不换 worker 数）。
 
 ## 二、演示脚本（按支路排，讲 5 分钟）
 
@@ -102,3 +139,8 @@ cd <项目根>
 | `Address already in use` | 上次进程没退干净 | 加 `--server.port 8502` |
 | 打开首页返回 200 但页面空白 | 脚本要等 websocket 连上才执行 | 别用 `curl` 判活，用 `python -m app.agent.webui --e2e` |
 | 侧栏轨迹显示的还是上一轮 | — | 正常情况每轮结尾会 `st.rerun()` 刷新；若仍不刷，点「结束会话」重开 |
+| **API** `Address already in use` | 8000 端口被上次没退干净的进程占着 | `.venv/Scripts/python.exe -m app.api.server --serve --port 8001` |
+| **`/chat` 客户端报超时**（服务端其实在正常跑） | `httpx` 默认超时 **5 秒**，而首个 RAG 轮要 **13 秒**（加载 BGE-M3） | 客户端显式 `timeout=60`。**这条不当 bug 修**——瓶颈是真的 |
+| **`/chat` 卡十几秒** | 首轮加载 BGE-M3，与 Streamlit 侧栏那个「预热模型」是同一件事 | 先随便发一句预热，之后每轮 500ms 上下 |
+| **`/sessions/{sid}` 返回 404，但明明刚聊过** | 会话在**另一个进程**的内存里（浏览器那个进程），HTTP 进程看不到 | 见第一节 ④ 的警告：两个进程的会话互不可见，别交叉演示 |
+| **`/chat` 报 500** | 状态机自己炸了（不是它内部兜住的那几种兜底） | 响应 `detail` 里**带了已经走到哪一步的轨迹**（刻意的，比一个干净的 500 有用），照 `detail.trace` 定位；`detail` 里没有 traceback 原文是设计如此 |

@@ -62,8 +62,32 @@ class SessionStore:
     def get(self, session_id: str) -> Session:
         return self._sessions.setdefault(session_id, Session())
 
+    def peek(self, session_id: str) -> Session | None:
+        """只读不建。**查询类调用一律用这个，不要用 get()。**
+
+        为什么必须分开：`get()` 走的是 `setdefault`，也就是**读即写**——
+        它保证"拿到的 Session 一定存在"，代价是"查一个不存在的 id 会当场把它造出来"。
+        这在 Agent 主流程里是想要的（用户一开口就该有会话），但在只读端点上是个陷阱：
+        `GET /sessions/{sid}` 调 `get()` 的话，查询一个拼错的 id 会返回 200 + 一个空会话，
+        既撒谎又往内存里漏一个永不回收的空对象。
+
+        两者的区别一句话：get() 是"给我这个会话，没有就新建"，
+        peek() 是"如果存在就给我，否则明确告诉我没有"。
+        """
+        return self._sessions.get(session_id)
+
     def drop(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
+
+    def count(self) -> int:
+        """当前会话数。**只读端点要观测"客户端在造会话"时必须走这里，别碰 _sessions。**
+
+        为什么加这个方法：加了 HTTP 之后，sid **由客户端给**（CLI 时代是进程自己生成的），
+        而本类无 TTL、无上限——这是新出现的外部可控的内存增长入口，需要一个观测口。
+        D1 说"接口照 Redis 的 key 设计切"，Redis 侧的对应物就是 DBSIZE；
+        直接读 self._sessions 是 dict 专有写法，接 Redis 时那一处会静默失效。
+        """
+        return len(self._sessions)
 
 
 # graph 默认用的实例
@@ -81,8 +105,22 @@ if __name__ == "__main__":
     assert s.history[0]["content"] == "问5", "截断应成对裁掉最老的 5 轮"
     assert all(m["role"] in ("user", "assistant") for m in s.history)
 
+    # peek：只读不建。这三条是 GET 类端点的地基，不能只测 get()
+    assert store.peek("t1") is s, "已存在的会话，peek 应拿到同一个实例"
+    assert store.peek("从没出现过的 id") is None, "peek 对未知 id 返回 None"
+    assert "从没出现过的 id" not in store._sessions, "peek 绝不能把会话建出来（读即写陷阱）"
+
     store.drop("t1")
+    assert store.peek("t1") is None, "drop 之后 peek 应查不到"
     assert store.get("t1").history == [], "drop 后是全新会话"
+    assert store.peek("t1") is not None, "get() 之后 peek 才查得到（两者语义不同）"
+
+    # count：/health 的 sessions 计数用它（D1：按 Redis 的 DBSIZE 设计）
+    n0 = store.count()
+    store.get("tc")
+    assert store.count() == n0 + 1, "get 之后计数应 +1"
+    store.drop("tc")
+    assert store.count() == n0, "drop 之后计数应回落"
 
     # D5：trace 是每会话独立的报告，且不参与历史
     assert Session().trace == {}, "新会话的 trace 应是空 dict"
@@ -91,4 +129,5 @@ if __name__ == "__main__":
     assert b.trace == {}, "两个会话的 trace 必须互不影响"
     assert all(set(m) == {"role", "content"} for m in a.history), \
         "trace 不得混进 history（history 只喂 prompt）"
-    print("自测通过：同实例复用 / 10 轮成对截断 / drop 重置 / trace 与会话一一对应")
+    print("自测通过：同实例复用 / 10 轮成对截断 / peek 只读不建 / drop 重置 / "
+          "count 计数 / trace 与会话一一对应")

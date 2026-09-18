@@ -3,10 +3,11 @@
 > 面向电商平台的智能客服 Agent：RAG 商品知识库检索 + Function Calling 业务系统调用，
 > 覆盖商品咨询、参数对比、个性化推荐、订单查询、售后处理全场景。
 
-**当前状态**（2026-09-13）：四层全部打通，离线自测全绿，检索评测 50 条集 hit@5 达到 **100%**。
-终端对话 `python -m app.agent.cli`，浏览器演示 `streamlit run app/agent/webui.py`——
-后者把每轮**内部状态**（意图/置信度、检索召回与引用判定、工具调用、命中的兜底）摊在侧栏上，
-是"点得开、看得见"的那个版本。
+**当前状态**（2026-09-18）：四层全部打通，离线自测全绿，检索评测 50 条集 hit@5 达到 **100%**。
+三个入口：终端对话 `python -m app.agent.cli`，浏览器演示 `streamlit run app/agent/webui.py`
+——后者把每轮**内部状态**（意图/置信度、检索召回与引用判定、工具调用、命中的兜底）摊在侧栏上，
+是"点得开、看得见"的那个版本；HTTP 服务 `python -m app.api.server --serve`
+——把同一套 Agent 包成**薄服务层**，让每轮内部决策轨迹变成任何人可 curl 的 JSON。
 
 | 层 | 状态 | 自测入口 |
 |---|---|---|
@@ -18,6 +19,7 @@
 | LangChain 版检索器（与手写版逐项对齐） | 已完成 | `python -m app.retrieval.lc_retriever` |
 | 本轮轨迹契约与渲染 | 已完成 | `python -m app.agent.trace_view` |
 | 演示前端（Streamlit） | 已完成 | `python -m app.agent.webui --e2e` |
+| 服务层（FastAPI 薄封装，6 个端点） | 已完成 | `python -m app.api.server` |
 | MySQL / Redis 接入 | 主动不做（见文末「明确不做」） | — |
 
 ## 架构
@@ -85,6 +87,9 @@ ShopMate/
 │   │   ├── trace_view.py   #   本轮轨迹的键名契约 + 渲染（CLI 与前端共用）
 │   │   ├── webui.py        #   Streamlit 演示前端：对话 + 侧栏摊开内部状态
 │   │   └── cli.py          #   命令行交互入口
+│   ├── api/                # 薄服务层：把上面这些包成 HTTP（**不含业务逻辑**）
+│   │   ├── schemas.py      #   Pydantic 请求/响应模型（/docs 就是照它生成的）
+│   │   └── server.py       #   FastAPI app + 6 个端点 + 离线自测
 │   └── llm/
 │       └── client.py       #   DeepSeek 封装（OpenAI 兼容）+ json_mode
 ├── data/
@@ -136,6 +141,7 @@ python -m app.agent.trace_view    # 轨迹渲染：标签覆盖 + 半成品轨�
 python -m app.agent.lg_graph      # LangGraph 版状态机：确认门三路 + 断点续跑（桩测，不联网）
 python -m app.retrieval.lc_retriever  # LangChain 版检索器：双版对照逐项一致（需已建库，不联网）
 python -m app.agent.webui --e2e   # 前端无头端到端（AppTest，同样不联网）
+python -m app.api.server          # 服务层 14 组断言（TestClient，同样不联网；lg 版再跑一遍）
 
 # 4. 建库（首次会从 HuggingFace 拉 BGE-M3，之后离线可用）
 python -m app.retrieval.indexer
@@ -153,7 +159,21 @@ SHOPMATE_AGENT=lg python -m app.agent.cli   # 同样的事，换 LangGraph 编�
 # 7. 浏览器演示（需 key；首次检索要加载 BGE-M3，十几秒）
 streamlit run app/agent/webui.py  # 侧栏能点开看本轮内部状态；有「预热模型」按钮
                                   # 同样支持 SHOPMATE_AGENT=lg 切 LangGraph 版
+
+# 8. HTTP 服务（需 key）：把同一个 Agent 暴露成 JSON 接口
+python -m app.api.server --serve            # 绑 127.0.0.1:8000，单 worker（代码里写死）
+# python -m app.api.server --serve --port 8001   # 8000 被占时换端口
+curl 127.0.0.1:8000/health                  # 存活 + 单 worker 证据（pid / uptime_s / sessions）
+curl 127.0.0.1:8000/tools                   # 6 个工具 + 读写分级
+curl -X POST 127.0.0.1:8000/chat -H "Content-Type: application/json" \
+     -d '{"message":"SKU-10001 续航多久"}'   # 响应里带本轮完整轨迹（trace.text 与 CLI /trace 同源）
+# 交互式文档：浏览器打开 http://127.0.0.1:8000/docs
 ```
+
+> ⚠️ **调用 `/chat` 的客户端必须自己设超时**。首个 RAG 轮实测约 13 秒（加载 BGE-M3），
+> 而 `httpx` 默认超时是 5 秒——用默认值会"看起来服务挂了，其实它在正常工作"。
+> 本项目自测用的是 `fastapi.testclient.TestClient`，**实测它不施加超时**
+> （`def` 端点里 `sleep(7)` 也正常返回 200），所以自测不会替你把这个问题暴露出来。
 
 > 前端怎么验：`python -m app.agent.webui --e2e` 是**真正的**端到端——它用
 > `streamlit.testing.v1.AppTest` 在同进程里执行整个脚本（桩掉检索与 LLM，全程离线），
@@ -248,6 +268,11 @@ BM25 漏 3 条，融合后只剩 2 条；再叠应用层锚点补到最后 2 条
 - [x] LangChain 版检索器（`app/retrieval/lc_retriever.py`）：langchain_chroma
       向量路 + 共用融合段，`SHOPMATE_RETRIEVER=lc` 切换；双版评测逐项一致
       （均为 90 / 94 / 96 / 100）
+- [x] 服务层（`app/api/`，FastAPI 薄封装）：把 `agent.handle()` 包成 HTTP，把每轮内部
+      决策轨迹从 Streamlit 侧栏里解放成**任何人可 curl 的 JSON**。6 个端点 / 3 个文件 /
+      零新增业务逻辑（"薄"的护栏：`openapi` 操作数 == 6，加端点必须改断言）。
+      单 worker 是运行约束、代码里强制不了，于是把违约做成**可检验**的：
+      `/health` 暴露 pid + uptime_s + sessions，配 `--workers 2` 能当场演示会话分裂
 - [x] ~~MySQL / Redis 接入~~ → 主动不做，理由见文末「明确不做」
 - [x] ~~多用户支持~~ → 注入点已收口（D6），接登录态时改一处即可
 
@@ -255,7 +280,8 @@ BM25 漏 3 条，融合后只剩 2 条；再叠应用层锚点补到最后 2 条
 
 Python 3.10+ · LangGraph（Agent 编排版）· LangChain（Embeddings/Chroma 集成）·
 ChromaDB · BGE-M3(FlagEmbedding) · rank-bm25 · jieba · DeepSeek API
-(OpenAI 兼容) · Streamlit（演示前端）· SQLite（演示数据 + checkpoint 落盘）
+(OpenAI 兼容) · FastAPI + uvicorn（薄服务层 `app/api/`）· Streamlit（演示前端）·
+SQLite（演示数据 + checkpoint 落盘）
 
 > **手写与框架并存，两种实现可切换**（2026-09 起）：
 > - 状态机：手写版 `app/agent/graph.py`（分支 + 显式 Session）与 LangGraph 版
@@ -292,6 +318,19 @@ ChromaDB · BGE-M3(FlagEmbedding) · rank-bm25 · jieba · DeepSeek API
 - **前端的两条进程内假设**：`SessionStore` 无锁（两个标签页并发会互踩）、浏览器刷新会
   遗弃一个 Session（无 TTL）。演示规模靠侧栏「结束会话」按钮手动回收，与
   "会话记忆是进程内存"那条同源
+- **服务层的四条已知代价**（`app/api/`，都记录但不修，因为修完就不是"薄"了）：
+  ① **单 worker 服务自己强制不了**——`--workers 2` 不报错，只会让会话随机丢失；
+  ② **同 sid 并发会互踩**（threadpool 默认 40 + `SessionStore` 无锁，`dissatisfaction += 1`
+  和 `history.append` 是读-改-写）。**这条的性质变了**：CLI 单线程、Streamlit 一个连接一条
+  脚本线程，几乎踩不到；加了 HTTP 之后它变成**能通过网络真踩到的竞态**，所以配两个约束——
+  部署上单 worker、使用上同一个 sid 不要并发发两条；
+  ③ **无 TTL / 无上限**：HTTP 让 sid **由客户端给**（CLI 时代是进程自己生成的），这是新的
+  外部可控的内存增长入口。只挡了长度（≤64 字符）没挡数量，`/health` 的 `sessions` 是唯一
+  观测口；④ **`/sessions/{sid}/trace` 只有最近一轮**，不是审计日志（`session.py` D5 的既定
+  取舍：轨迹是报告不是状态）。跨轮历史在 `data/logs/retrieval.jsonl`
+- **lg 版下 `dissatisfaction` / `tool_fail_streak` 恒为 0**：Session 在 lg 下只是视图模型，
+  只镜像 `trace` / `history` / `current_product_id` / `pending_write` 四个字段。
+  `GET /sessions/{sid}` 的响应里用 `notes` 自动声明，**不许让调用方读成"用户从没不满过"**
 - **RAGAS 的 answer_relevancy 这一项不可信，别当结论引用**：15 条试跑里出现 4 个
   **精确的 0.000**，查下去不空回复、也不是抽样被剥（对 Qwen 放行 n 无效，langchain
   那条路径压根没把 n 传进请求体）。真正的成因是**生成侧的不确定性传导**：RAG 用
@@ -303,7 +342,16 @@ ChromaDB · BGE-M3(FlagEmbedding) · rank-bm25 · jieba · DeepSeek API
 
 - **MySQL / Redis 接入**：8 SKU 的演示量级下 SQLite + 进程内存没有可观察的差别，
   换上去收益是零。规范已写在 [docs/04_data_schema.md](docs/04_data_schema.md)，
-  接了真实业务量再按图替换
+  接了真实业务量再按图替换。**注意它和下面那条是同一件事的两面**：正因为会话在进程内存
+  （没接 Redis），HTTP 服务才只能单 worker
+- **把服务层做厚（SSE / 鉴权 / CORS / 多副本）**：`app/api/` 有一个 FastAPI 薄封装，
+  但它**刻意停在边界上**——3 个文件、6 个端点、不 import 任何业务模块。SSE（首轮 13 秒
+  确实难等）、鉴权（每个 `/chat` 是 1~4 次 DeepSeek 调用）、CORS、多副本，**每一条都有
+  正当理由，每一条也都会让"薄"不再是薄**；加鉴权的那一刻它就不再是薄层，所以那是这个
+  定位的**天然期限**，不是欠账。单 worker 是运行约束、服务在代码里强制不了
+  （`--workers 2` 照样跑，只是同一会话被分到不同进程、各拿一个空会话），
+  所以把它做成了**可检验的**：`/health` 的 `pid` + `uptime_s` + `sessions` 就是证据。
+  **停在边界上是判断，越过边界才是欠债。**
 - **多用户会话**：`user_id` 目前硬编码 `"u1001"`，但**身份注入点已经收口**在
   `executor.execute`（决策 D6：丢弃模型自填的 user_id，一律以会话身份覆盖）。
   接登录态时只改这一处来源。当前单用户演示形态下不会串户
